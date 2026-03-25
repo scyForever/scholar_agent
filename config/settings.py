@@ -57,15 +57,15 @@ def _provider_defaults() -> Dict[str, Dict[str, Any]]:
     return {
         "siliconflow": {
             "priority": 3,
-            "model": os.getenv("SILICONFLOW_MODEL", "deepseek-ai/DeepSeek-V3"),
+            "model": os.getenv("SILICONFLOW_MODEL", "Pro/deepseek-ai/DeepSeek-V3.2"),
             "base_url": os.getenv(
-                "SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"
+                "SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1/chat/completions"
             ),
             "api_key_name": "SILICONFLOW_API_KEY",
         },
         "zhipu": {
             "priority": 3,
-            "model": os.getenv("ZHIPU_MODEL", "glm-4-flash"),
+            "model": os.getenv("ZHIPU_MODEL", "glm-4.7"),
             "base_url": os.getenv(
                 "ZHIPU_BASE_URL",
                 "https://open.bigmodel.cn/api/paas/v4/chat/completions",
@@ -84,7 +84,7 @@ def _provider_defaults() -> Dict[str, Dict[str, Any]]:
         "deepseek": {
             "priority": 2,
             "model": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-            "base_url": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            "base_url": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/chat/completions"),
             "api_key_name": "DEEPSEEK_API_KEY",
         },
         "moonshot": {

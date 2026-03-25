@@ -12,6 +12,15 @@ from api_keys import get_api_key
 from config.settings import settings
 
 
+def _resolve_chat_completions_url(base_url: str) -> str:
+    normalized = base_url.strip().rstrip("/")
+    if not normalized:
+        return ""
+    if normalized.endswith("/chat/completions"):
+        return normalized
+    return f"{normalized}/chat/completions"
+
+
 @dataclass(slots=True)
 class ProviderStatus:
     available: bool = True
@@ -154,7 +163,7 @@ class LLMManager:
             self.providers[name] = OpenAICompatibleProvider(
                 name=name,
                 model=str(cfg.get("model", "")),
-                base_url=base_url,
+                base_url=_resolve_chat_completions_url(base_url),
                 priority=int(cfg.get("priority", 1)),
                 timeout=settings.llm_timeout,
                 max_retries=settings.llm_max_retries,
