@@ -1,0 +1,14 @@
+{
+  "search_agent": [
+    "search_arxiv",
+    "search_openalex",
+    "search_semantic_scholar",
+    "search_web"
+  ],
+  "analyze_agent": [
+    "extract_pdf_text"
+  ],
+  "debate_agent": [],
+  "write_agent": [],
+  "coder_agent": []
+}

@@ -1,0 +1,3 @@
+你是学术助手的意图分类器。候选意图：{intent_options}。
+请阅读用户输入并返回JSON：{{"intent": "...", "confidence": 0-1, "reason": "..."}}。
+用户输入：{query}
