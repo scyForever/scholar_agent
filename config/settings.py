@@ -55,6 +55,14 @@ class AppSettings:
 
 def _provider_defaults() -> Dict[str, Dict[str, Any]]:
     return {
+        "scnet": {
+            "priority": 4,
+            "model": os.getenv("SCNET_MODEL", "MiniMax-M2.5"),
+            "base_url": os.getenv(
+                "SCNET_BASE_URL", "https://api.scnet.cn/api/llm/v1/chat/completions"
+            ),
+            "api_key_name": "SCNET_API_KEY",
+        },
         "siliconflow": {
             "priority": 3,
             "model": os.getenv("SILICONFLOW_MODEL", "Pro/deepseek-ai/DeepSeek-V3.2"),
@@ -84,7 +92,9 @@ def _provider_defaults() -> Dict[str, Dict[str, Any]]:
         "deepseek": {
             "priority": 2,
             "model": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-            "base_url": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/chat/completions"),
+            "base_url": os.getenv(
+                "DEEPSEEK_BASE_URL", "https://api.deepseek.com/chat/completions"
+            ),
             "api_key_name": "DEEPSEEK_API_KEY",
         },
         "moonshot": {
