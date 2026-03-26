@@ -57,27 +57,31 @@ class MemoryManager:
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = db_path or settings.memory_db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path)
-        self.conn.row_factory = sqlite3.Row
         self._create_tables()
 
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
     def _create_tables(self) -> None:
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS memories (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                type TEXT NOT NULL,
-                content TEXT NOT NULL,
-                metadata TEXT NOT NULL,
-                importance REAL NOT NULL,
-                access_count INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memories (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    metadata TEXT NOT NULL,
+                    importance REAL NOT NULL,
+                    access_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        self.conn.commit()
+            conn.commit()
 
     def store(
         self,
@@ -90,24 +94,25 @@ class MemoryManager:
     ) -> str:
         now = datetime.utcnow().isoformat()
         memory_id = str(uuid4())
-        self.conn.execute(
-            """
-            INSERT INTO memories (id, user_id, type, content, metadata, importance, access_count, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                memory_id,
-                user_id,
-                memory_type.value,
-                content,
-                json.dumps(metadata or {}, ensure_ascii=False),
-                float(importance),
-                0,
-                now,
-                now,
-            ),
-        )
-        self.conn.commit()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO memories (id, user_id, type, content, metadata, importance, access_count, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    memory_id,
+                    user_id,
+                    memory_type.value,
+                    content,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                    float(importance),
+                    0,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
         return memory_id
 
     def recall(
@@ -129,29 +134,74 @@ class MemoryManager:
         sql = "SELECT * FROM memories"
         if where:
             sql += " WHERE " + " AND ".join(where)
-        rows = self.conn.execute(sql, params).fetchall()
-        if not rows:
-            return []
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            if not rows:
+                return []
 
-        contents = [row["content"] for row in rows]
-        vectorizer = TfidfVectorizer(ngram_range=(1, 2))
-        matrix = vectorizer.fit_transform(contents + [query])
-        similarities = cosine_similarity(matrix[:-1], matrix[-1]).ravel()
-        bm25 = _bm25_scores(query, contents)
-        now = datetime.utcnow()
+            contents = [row["content"] for row in rows]
+            vectorizer = TfidfVectorizer(ngram_range=(1, 2))
+            matrix = vectorizer.fit_transform(contents + [query])
+            similarities = cosine_similarity(matrix[:-1], matrix[-1]).ravel()
+            bm25 = _bm25_scores(query, contents)
+            now = datetime.utcnow()
 
-        scored: List[MemoryRecord] = []
-        for idx, row in enumerate(rows):
-            created_at = datetime.fromisoformat(row["created_at"])
-            recency_days = max((now - created_at).days, 0)
-            recency_bonus = math.exp(-recency_days / 30)
-            score = (
-                0.45 * float(similarities[idx])
-                + 0.25 * float(bm25[idx])
-                + 0.2 * float(row["importance"])
-                + 0.1 * recency_bonus
+            scored: List[MemoryRecord] = []
+            for idx, row in enumerate(rows):
+                created_at = datetime.fromisoformat(row["created_at"])
+                recency_days = max((now - created_at).days, 0)
+                recency_bonus = math.exp(-recency_days / 30)
+                score = (
+                    0.45 * float(similarities[idx])
+                    + 0.25 * float(bm25[idx])
+                    + 0.2 * float(row["importance"])
+                    + 0.1 * recency_bonus
+                )
+                scored.append(
+                    MemoryRecord(
+                        memory_id=row["id"],
+                        user_id=row["user_id"],
+                        content=row["content"],
+                        memory_type=MemoryType(row["type"]),
+                        metadata=json.loads(row["metadata"]),
+                        importance=row["importance"],
+                        access_count=row["access_count"],
+                        created_at=created_at,
+                        updated_at=datetime.fromisoformat(row["updated_at"]),
+                        score=score,
+                    )
+                )
+
+            scored.sort(key=lambda item: item.score, reverse=True)
+            selected = scored[:limit]
+            for record in selected:
+                conn.execute(
+                    "UPDATE memories SET access_count = access_count + 1, updated_at = ? WHERE id = ?",
+                    (datetime.utcnow().isoformat(), record.memory_id),
+                )
+            conn.commit()
+            return selected
+
+    def forget(self, importance_threshold: float = 0.3, older_than_days: int = 90) -> int:
+        cutoff = (datetime.utcnow() - timedelta(days=older_than_days)).isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM memories
+                WHERE importance < ? AND updated_at < ?
+                """,
+                (importance_threshold, cutoff),
             )
-            scored.append(
+            conn.commit()
+            return cursor.rowcount
+
+    def list_recent(self, limit: int = 10) -> List[MemoryRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM memories ORDER BY updated_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [
                 MemoryRecord(
                     memory_id=row["id"],
                     user_id=row["user_id"],
@@ -160,50 +210,8 @@ class MemoryManager:
                     metadata=json.loads(row["metadata"]),
                     importance=row["importance"],
                     access_count=row["access_count"],
-                    created_at=created_at,
+                    created_at=datetime.fromisoformat(row["created_at"]),
                     updated_at=datetime.fromisoformat(row["updated_at"]),
-                    score=score,
                 )
-            )
-
-        scored.sort(key=lambda item: item.score, reverse=True)
-        selected = scored[:limit]
-        for record in selected:
-            self.conn.execute(
-                "UPDATE memories SET access_count = access_count + 1, updated_at = ? WHERE id = ?",
-                (datetime.utcnow().isoformat(), record.memory_id),
-            )
-        self.conn.commit()
-        return selected
-
-    def forget(self, importance_threshold: float = 0.3, older_than_days: int = 90) -> int:
-        cutoff = (datetime.utcnow() - timedelta(days=older_than_days)).isoformat()
-        cursor = self.conn.execute(
-            """
-            DELETE FROM memories
-            WHERE importance < ? AND updated_at < ?
-            """,
-            (importance_threshold, cutoff),
-        )
-        self.conn.commit()
-        return cursor.rowcount
-
-    def list_recent(self, limit: int = 10) -> List[MemoryRecord]:
-        rows = self.conn.execute(
-            "SELECT * FROM memories ORDER BY updated_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [
-            MemoryRecord(
-                memory_id=row["id"],
-                user_id=row["user_id"],
-                content=row["content"],
-                memory_type=MemoryType(row["type"]),
-                metadata=json.loads(row["metadata"]),
-                importance=row["importance"],
-                access_count=row["access_count"],
-                created_at=datetime.fromisoformat(row["created_at"]),
-                updated_at=datetime.fromisoformat(row["updated_at"]),
-            )
-            for row in rows
-        ]
+                for row in rows
+            ]

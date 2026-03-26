@@ -89,6 +89,7 @@ class WhiteboxTracer:
         return self.get_trace(trace_id).get("steps", [])
 
     def _persist(self, trace_id: str) -> None:
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
         path = self.storage_dir / f"{trace_id}.json"
         path.write_text(
             json.dumps(self._traces[trace_id], ensure_ascii=False, indent=2),

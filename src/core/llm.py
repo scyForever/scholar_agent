@@ -21,6 +21,58 @@ def _resolve_chat_completions_url(base_url: str) -> str:
     return f"{normalized}/chat/completions"
 
 
+def _extract_text_from_content(content: Any) -> Optional[str]:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+                continue
+            if isinstance(text, dict) and isinstance(text.get("value"), str):
+                parts.append(str(text["value"]))
+                continue
+            nested = item.get("content")
+            if isinstance(nested, str):
+                parts.append(nested)
+        merged = "\n".join(part for part in parts if part)
+        return merged or None
+    return None
+
+
+def _extract_response_text(body: Dict[str, Any]) -> Optional[str]:
+    choices = body.get("choices")
+    if isinstance(choices, list) and choices:
+        first_choice = choices[0]
+        if isinstance(first_choice, dict):
+            message = first_choice.get("message")
+            if isinstance(message, dict):
+                extracted = _extract_text_from_content(message.get("content"))
+                if extracted is not None:
+                    return extracted
+            legacy_text = first_choice.get("text")
+            if isinstance(legacy_text, str):
+                return legacy_text
+
+    output_text = body.get("output_text")
+    if isinstance(output_text, str):
+        return output_text
+
+    output = body.get("output")
+    if isinstance(output, list):
+        extracted = _extract_text_from_content(output)
+        if extracted is not None:
+            return extracted
+    return None
+
+
 @dataclass(slots=True)
 class ProviderStatus:
     available: bool = True
@@ -102,7 +154,13 @@ class OpenAICompatibleProvider(LLMProvider):
                 )
                 response.raise_for_status()
                 body = response.json()
-                return body["choices"][0]["message"]["content"]
+                content = _extract_response_text(body)
+                if content is None:
+                    raise RuntimeError(
+                        f"Provider {self.name} returned no text content: "
+                        f"{json.dumps(body, ensure_ascii=False)[:1000]}"
+                    )
+                return content
             except Exception as exc:  # pragma: no cover
                 last_error = exc
                 if attempt < self.max_retries:

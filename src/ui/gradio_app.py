@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, List, Tuple
+from typing import Any, Dict, List
 
 import gradio as gr
 
@@ -13,18 +13,21 @@ def create_app() -> gr.Blocks:
 
     def handle_submit(
         message: str,
-        history: List[Tuple[str, str]],
+        history: List[Dict[str, Any]],
         pdf_file: str | None,
         fast_mode: bool,
         quality_mode: bool,
-    ) -> tuple[List[Tuple[str, str]], str, str]:
+    ) -> tuple[List[Dict[str, Any]], str, str]:
         history = history or []
         if pdf_file:
             agent.index_pdf(pdf_file)
 
         agent.set_mode(fast_mode=fast_mode, enable_quality_enhance=quality_mode)
         response = agent.chat(message, session_id="web-user")
-        history = history + [(message, response.answer)]
+        history = history + [
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": response.answer},
+        ]
         whitebox = json.dumps(response.whitebox, ensure_ascii=False, indent=2)
         return history, whitebox, response.intent
 

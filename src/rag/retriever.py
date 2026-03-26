@@ -62,71 +62,77 @@ class HybridRetriever:
     def __init__(self, db_path: Path | None = None, llm: LLMManager | None = None) -> None:
         self.db_path = db_path or (settings.memory_dir / "rag_index.db")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path)
-        self.conn.row_factory = sqlite3.Row
         self.llm = llm or LLMManager()
         self.rewriter = QueryRewriter()
         self._create_tables()
 
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
     def _create_tables(self) -> None:
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS documents (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                metadata TEXT NOT NULL,
-                created_at TEXT NOT NULL
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS documents (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    metadata TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS chunks (
-                id TEXT PRIMARY KEY,
-                document_id TEXT NOT NULL,
-                source_type TEXT NOT NULL,
-                content TEXT NOT NULL,
-                metadata TEXT NOT NULL
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chunks (
+                    id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    metadata TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        self.conn.commit()
+            conn.commit()
 
     def index_pdf(self, pdf_path: str, title: str | None = None, metadata: Dict[str, Any] | None = None) -> str:
         extracted = extract_pdf_text(pdf_path)
         document_id = str(uuid4())
         merged_metadata = {"pdf_path": pdf_path, **(metadata or {})}
-        self.conn.execute(
-            "INSERT INTO documents (id, title, metadata, created_at) VALUES (?, ?, ?, ?)",
-            (
-                document_id,
-                title or Path(pdf_path).stem,
-                json.dumps(merged_metadata, ensure_ascii=False),
-                datetime.utcnow().isoformat(),
-            ),
-        )
-        self._store_chunks(document_id, extracted["chunks"], "text_chunk")
-        self._store_chunks(document_id, extracted["tables"], "table_chunk")
-        self._store_chunks(document_id, [item["answer"] for item in extracted["qa_pairs"]], "qa_chunk")
-        self._store_chunks(document_id, self._build_kg_triples(extracted["chunks"]), "kg_chunk")
-        self.conn.commit()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO documents (id, title, metadata, created_at) VALUES (?, ?, ?, ?)",
+                (
+                    document_id,
+                    title or Path(pdf_path).stem,
+                    json.dumps(merged_metadata, ensure_ascii=False),
+                    datetime.utcnow().isoformat(),
+                ),
+            )
+            self._store_chunks(conn, document_id, extracted["chunks"], "text_chunk")
+            self._store_chunks(conn, document_id, extracted["tables"], "table_chunk")
+            self._store_chunks(conn, document_id, [item["answer"] for item in extracted["qa_pairs"]], "qa_chunk")
+            self._store_chunks(conn, document_id, self._build_kg_triples(extracted["chunks"]), "kg_chunk")
+            conn.commit()
         return document_id
 
     def index_text(self, title: str, text: str, metadata: Dict[str, Any] | None = None) -> str:
         document_id = str(uuid4())
-        self.conn.execute(
-            "INSERT INTO documents (id, title, metadata, created_at) VALUES (?, ?, ?, ?)",
-            (
-                document_id,
-                title,
-                json.dumps(metadata or {}, ensure_ascii=False),
-                datetime.utcnow().isoformat(),
-            ),
-        )
-        chunks = self._chunk_text(text)
-        self._store_chunks(document_id, chunks, "text_chunk")
-        self._store_chunks(document_id, self._build_kg_triples(chunks), "kg_chunk")
-        self.conn.commit()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO documents (id, title, metadata, created_at) VALUES (?, ?, ?, ?)",
+                (
+                    document_id,
+                    title,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                    datetime.utcnow().isoformat(),
+                ),
+            )
+            chunks = self._chunk_text(text)
+            self._store_chunks(conn, document_id, chunks, "text_chunk")
+            self._store_chunks(conn, document_id, self._build_kg_triples(chunks), "kg_chunk")
+            conn.commit()
         return document_id
 
     def retrieve(self, query: str, chat_history: List[Dict[str, str]] | None = None, top_k: int | None = None) -> Dict[str, Any]:
@@ -136,9 +142,10 @@ class HybridRetriever:
         routes = self._route_sources(enhanced_query)
 
         ranked_lists: List[List[IndexedChunk]] = []
-        for rewritten_query in rewrites:
-            for source_type in routes:
-                ranked_lists.append(self._retrieve_from_source(rewritten_query, source_type, top_k * 2))
+        with self._connect() as conn:
+            for rewritten_query in rewrites:
+                for source_type in routes:
+                    ranked_lists.append(self._retrieve_from_source(conn, rewritten_query, source_type, top_k * 2))
 
         fused = self._rrf_fusion(ranked_lists)
         reranked = self._rerank(enhanced_query, fused)
@@ -161,12 +168,18 @@ class HybridRetriever:
             },
         }
 
-    def _store_chunks(self, document_id: str, items: Iterable[str], source_type: str) -> None:
+    def _store_chunks(
+        self,
+        conn: sqlite3.Connection,
+        document_id: str,
+        items: Iterable[str],
+        source_type: str,
+    ) -> None:
         for content in items:
             content = str(content).strip()
             if not content:
                 continue
-            self.conn.execute(
+            conn.execute(
                 "INSERT INTO chunks (id, document_id, source_type, content, metadata) VALUES (?, ?, ?, ?, ?)",
                 (str(uuid4()), document_id, source_type, content, json.dumps({}, ensure_ascii=False)),
             )
@@ -226,8 +239,14 @@ class HybridRetriever:
             routes.append("kg_chunk")
         return list(dict.fromkeys(routes))
 
-    def _retrieve_from_source(self, query: str, source_type: str, limit: int) -> List[IndexedChunk]:
-        rows = self.conn.execute(
+    def _retrieve_from_source(
+        self,
+        conn: sqlite3.Connection,
+        query: str,
+        source_type: str,
+        limit: int,
+    ) -> List[IndexedChunk]:
+        rows = conn.execute(
             "SELECT * FROM chunks WHERE source_type = ?",
             (source_type,),
         ).fetchall()
