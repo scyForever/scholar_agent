@@ -29,6 +29,7 @@ class AppSettings:
     llm_max_retries: int = 2
     llm_failure_threshold: int = 3
     llm_recovery_time: int = 300
+    llm_long_output_max_tokens: int = 32000
     default_fast_mode: bool = False
     max_search_results: int = 20
     rag_chunk_size: int = 500
@@ -36,6 +37,10 @@ class AppSettings:
     rag_rrf_k: int = 60
     rag_cc_alpha: float = 0.6
     rag_top_k: int = 10
+    wos_documents_url: str = os.getenv(
+        "WOS_DOCUMENTS_URL", "https://api.clarivate.com/apis/wos-starter/v1/documents"
+    )
+    wos_default_database: str = os.getenv("WOS_DATABASE", "WOS")
     provider_configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def ensure_runtime_dirs(self) -> None:

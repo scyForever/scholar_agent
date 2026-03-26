@@ -5,6 +5,7 @@ from typing import List
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+from config.settings import settings
 from src.core.llm import LLMManager
 from src.core.models import MoAResult, VerificationResult
 
@@ -23,6 +24,7 @@ class QualityEnhancer:
                     self.llm.call(
                         f"问题：{query}\n上下文：{context}\n请给出你的最佳回答。",
                         provider=provider,
+                        max_tokens=settings.llm_long_output_max_tokens,
                     )
                 )
         else:
@@ -31,6 +33,7 @@ class QualityEnhancer:
                     self.llm.call(
                         f"问题：{query}\n上下文：{context}\n请给出你的最佳回答。",
                         temperature=temperature,
+                        max_tokens=settings.llm_long_output_max_tokens,
                     )
                 )
 
@@ -38,7 +41,7 @@ class QualityEnhancer:
             "你将收到多个候选答案，请聚合其共同结论，保留差异点，并输出更强的最终答案。\n"
             f"问题：{query}\n候选答案：\n" + "\n\n".join(candidates)
         )
-        answer = self.llm.call(aggregate_prompt)
+        answer = self.llm.call(aggregate_prompt, max_tokens=settings.llm_long_output_max_tokens)
         return MoAResult(answer=answer, candidates=candidates, rationale="Aggregated candidate responses.", score=0.82)
 
     def mpsc_verify(self, query: str, answer: str) -> VerificationResult:

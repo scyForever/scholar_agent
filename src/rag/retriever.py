@@ -63,7 +63,7 @@ class HybridRetriever:
         self.db_path = db_path or (settings.memory_dir / "rag_index.db")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.llm = llm or LLMManager()
-        self.rewriter = QueryRewriter()
+        self.rewriter = QueryRewriter(self.llm)
         self._create_tables()
 
     def _connect(self) -> sqlite3.Connection:
@@ -216,17 +216,7 @@ class HybridRetriever:
         return query
 
     def _rewrite_queries(self, query: str) -> List[str]:
-        normalized = self.rewriter.normalize_topic(query)
-        variants = [normalized]
-        variants.extend(self.rewriter.rewrite(query))
-        variants.append(f"{normalized} background definition and methodology")
-        variants.append(f"{normalized} decomposition key questions")
-        deduped: List[str] = []
-        for item in variants:
-            item = " ".join(item.split())
-            if item and item not in deduped:
-                deduped.append(item)
-        return deduped[:8]
+        return self.rewriter.rewrite(query, intent="search_papers", target="local")[:8]
 
     def _route_sources(self, query: str) -> List[str]:
         routes = ["text_chunk"]

@@ -73,7 +73,7 @@ def _parse_paper(item: Dict[str, Any], query: str) -> Optional[Paper]:
     )
 )
 def search_semantic_scholar(query: str, max_results: int = 10, time_range: str = "") -> List[Paper]:
-    rewritten = QueryRewriter().normalize_topic(query)
+    rewritten = QueryRewriter().to_english_query(query)
     try:
         response = requests.get(
             "https://api.semanticscholar.org/graph/v1/paper/search",

@@ -3,6 +3,7 @@
     "search_arxiv",
     "search_openalex",
     "search_semantic_scholar",
+    "search_web_of_science",
     "search_web"
   ],
   "analyze_agent": [

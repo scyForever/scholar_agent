@@ -53,7 +53,7 @@ def search_arxiv(query: str, max_results: int = 10, time_range: str = "") -> Lis
     except ImportError:
         return []
 
-    rewritten = QueryRewriter().normalize_topic(query)
+    rewritten = QueryRewriter().to_english_query(query)
     lowered = rewritten.lower()
     category_filter = []
     for topic, categories in TOPIC_CATEGORIES.items():

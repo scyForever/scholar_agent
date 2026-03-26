@@ -8,7 +8,13 @@ from config.settings import settings
 
 
 DEFAULT_WHITELIST: Dict[str, List[str]] = {
-    "search_agent": ["search_arxiv", "search_openalex", "search_semantic_scholar", "search_web"],
+    "search_agent": [
+        "search_arxiv",
+        "search_openalex",
+        "search_semantic_scholar",
+        "search_web_of_science",
+        "search_web",
+    ],
     "analyze_agent": ["extract_pdf_text"],
     "debate_agent": [],
     "write_agent": [],

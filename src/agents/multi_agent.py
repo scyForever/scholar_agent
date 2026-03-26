@@ -4,6 +4,7 @@ from collections import defaultdict
 from dataclasses import asdict
 from typing import Any, Dict, List
 
+from config.settings import settings
 from src.core.llm import LLMManager
 from src.core.models import DebateResult, ExecutionMode, Paper, PaperAnalysis, SearchResult
 from src.preprocessing.query_rewriter import QueryRewriter
@@ -20,11 +21,12 @@ class SearchAgent:
         self.retriever = retriever
         self.whitelist = whitelist
         self.tracer = tracer
-        self.rewriter = QueryRewriter()
+        self.rewriter = QueryRewriter(retriever.llm)
 
     def run(
         self,
         query: str,
+        intent: str,
         slots: Dict[str, Any],
         history: List[Dict[str, str]],
         trace_id: str,
@@ -32,7 +34,7 @@ class SearchAgent:
         topic = str(slots.get("topic") or slots.get("paper_title") or query)
         time_range = str(slots.get("time_range") or "")
         max_results = int(slots.get("max_papers") or 12)
-        rewritten_queries = self.rewriter.rewrite(topic)
+        rewritten_queries = self.rewriter.rewrite(topic, intent=intent, target="external")
         allowed_tools = [
             tool for tool in self.whitelist.allowed_tools("search_agent") if tool != "search_web"
         ]
@@ -173,7 +175,7 @@ class WriteAgent:
                 topic=query,
                 materials=materials,
             )
-            answer = self.llm.call(prompt)
+            answer = self.llm.call(prompt, max_tokens=settings.llm_long_output_max_tokens)
         self.tracer.trace_step(trace_id, "write", {"intent": intent}, {"answer_preview": answer[:500]})
         return answer
 
@@ -271,7 +273,7 @@ class MultiAgentCoordinator:
 
         for step in flow:
             if step == "search":
-                search_result = self.search_agent.run(query, slots, history or [], trace_id)
+                search_result = self.search_agent.run(query, intent, slots, history or [], trace_id)
                 artifacts["search_result"] = search_result
             elif step == "analyze" and search_result is not None:
                 analyses = self.analyze_agent.run(search_result.papers, trace_id)

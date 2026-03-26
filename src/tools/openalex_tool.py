@@ -91,7 +91,7 @@ def _parse_work(work: Dict[str, Any], search_query: str) -> Optional[Paper]:
     )
 )
 def search_openalex(query: str, max_results: int = 10, time_range: str = "") -> List[Paper]:
-    rewritten = QueryRewriter().normalize_topic(query)
+    rewritten = QueryRewriter().to_english_query(query)
     try:
         response = requests.get(
             "https://api.openalex.org/works",
