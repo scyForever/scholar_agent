@@ -15,17 +15,28 @@ class QualityEnhancer:
         self.llm = llm or LLMManager()
 
     def self_moa(self, query: str, context: str) -> MoAResult:
-        providers = [name for name in self.llm.providers if name != "mock"][:3]
+        real_providers = [name for name in self.llm.providers if name != "mock"]
+        explicit_providers = [name for name in real_providers if name != "scnet"][:3]
         candidates: List[str] = []
 
-        if providers:
-            for provider in providers:
+        if explicit_providers:
+            for provider in explicit_providers:
                 candidates.append(
                     self.llm.call(
                         f"问题：{query}\n上下文：{context}\n请给出你的最佳回答。",
                         provider=provider,
                         max_tokens=settings.llm_long_output_max_tokens,
                         purpose=f"质量增强候选-{provider}",
+                    )
+                )
+        elif real_providers:
+            for temperature in (0.1, 0.4, 0.7):
+                candidates.append(
+                    self.llm.call(
+                        f"问题：{query}\n上下文：{context}\n请给出你的最佳回答。",
+                        temperature=temperature,
+                        max_tokens=settings.llm_long_output_max_tokens,
+                        purpose="质量增强候选",
                     )
                 )
         else:

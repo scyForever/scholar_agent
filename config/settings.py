@@ -25,7 +25,7 @@ class AppSettings:
     trace_dir: Path = BASE_DIR / "logs" / "traces"
     memory_db_path: Path = BASE_DIR / "data" / "memory" / "memory.db"
     feedback_path: Path = BASE_DIR / "data" / "feedback" / "feedback.jsonl"
-    llm_timeout: int = 60
+    llm_timeout: int = int(os.getenv("LLM_TIMEOUT", "180"))
     llm_max_retries: int = 2
     llm_failure_threshold: int = 3
     llm_recovery_time: int = 300

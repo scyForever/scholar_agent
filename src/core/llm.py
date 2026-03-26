@@ -169,7 +169,9 @@ class OpenAICompatibleProvider(LLMProvider):
                 last_error = exc
                 if attempt < self.max_retries:
                     time.sleep((attempt + 1) * 2)
-        raise RuntimeError(f"Provider {self.name} call failed") from last_error
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"Provider {self.name} call failed")
 
 
 class MockProvider(LLMProvider):
@@ -449,6 +451,15 @@ class LLMManager:
             )
             return result
         except Exception as exc:
+            response = getattr(exc, "response", None)
+            http_status = None
+            error_response_preview = ""
+            if response is not None:
+                http_status = getattr(response, "status_code", None)
+                try:
+                    error_response_preview = str(response.text)[:400]
+                except Exception:
+                    error_response_preview = ""
             self._trace_llm_event(
                 call_id=call_id,
                 phase="completed",
@@ -463,6 +474,9 @@ class LLMManager:
                 fallback=fallback,
                 latency_ms=(time.perf_counter() - started) * 1000.0,
                 error=str(exc)[:400],
+                error_type=type(exc).__name__,
+                http_status=http_status,
+                error_response_preview=error_response_preview,
             )
             raise
 
@@ -488,6 +502,9 @@ class LLMManager:
         latency_ms: Optional[float] = None,
         response_preview: str = "",
         error: str = "",
+        error_type: str = "",
+        http_status: Optional[int] = None,
+        error_response_preview: str = "",
     ) -> None:
         trace_id = self._trace_id_var.get()
         tracer = self._tracer_var.get()
@@ -514,6 +531,9 @@ class LLMManager:
                 "latency_ms": round(latency_ms, 1) if latency_ms is not None else None,
                 "response_preview": response_preview,
                 "error": error,
+                "error_type": error_type,
+                "http_status": http_status,
+                "error_response_preview": error_response_preview,
             },
             metadata={"attempt": attempt, "fallback": fallback},
         )
