@@ -135,12 +135,35 @@ class AgentV2:
                 artifacts["reasoning"] = reasoning
 
             if self.enable_quality_enhance and self.execution_mode == ExecutionMode.FULL:
-                moa_result = self.quality.self_moa(query, answer)
-                verification = self.quality.mpsc_verify(query, moa_result.answer)
-                answer = moa_result.answer
-                artifacts["moa"] = moa_result
-                artifacts["verification"] = verification
-                self.tracer.trace_step(trace_id, "quality", {"query": query}, {"verification": verification.verdict})
+                base_answer = answer
+                try:
+                    moa_result = self.quality.self_moa(query, answer)
+                    verification = self.quality.mpsc_verify(query, moa_result.answer)
+                    answer = moa_result.answer
+                    artifacts["moa"] = moa_result
+                    artifacts["verification"] = verification
+                    self.tracer.trace_step(
+                        trace_id,
+                        "quality",
+                        {"query": query},
+                        {
+                            "verification": verification.verdict,
+                            "moa_errors": moa_result.errors,
+                            "verification_errors": verification.errors,
+                        },
+                    )
+                except Exception as exc:
+                    answer = base_answer
+                    artifacts["quality_error"] = f"{type(exc).__name__}: {exc}"
+                    self.tracer.trace_step(
+                        trace_id,
+                        "quality",
+                        {"query": query},
+                        {
+                            "verification": "failed_but_preserved_answer",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        },
+                    )
 
             self.memory.store(
                 session_id,

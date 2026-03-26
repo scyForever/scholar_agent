@@ -91,6 +91,7 @@ class MoAResult:
     candidates: List[str] = field(default_factory=list)
     rationale: str = ""
     score: float = 0.0
+    errors: List[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -100,6 +101,7 @@ class VerificationResult:
     paths: List[str] = field(default_factory=list)
     verdict: str = "unknown"
     suggestions: List[str] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

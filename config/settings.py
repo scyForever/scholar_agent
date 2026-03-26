@@ -29,7 +29,7 @@ class AppSettings:
     llm_max_retries: int = 2
     llm_failure_threshold: int = 3
     llm_recovery_time: int = 300
-    llm_long_output_max_tokens: int = 32000
+    llm_long_output_max_tokens: int = 8192
     default_fast_mode: bool = False
     max_search_results: int = 20
     rag_chunk_size: int = 500
