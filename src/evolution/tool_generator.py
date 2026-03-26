@@ -17,7 +17,7 @@ class ToolGenerator:
             "请生成一个 Python 工具函数文件，包含函数定义、文档字符串和基本参数校验。"
             f"\n工具名：{tool_name}\n描述：{description}"
         )
-        code = self.llm.call(prompt)
+        code = self.llm.call(prompt, purpose="工具生成")
         target_path = target_dir / f"{tool_name}.py"
         template = (
             f'"""Auto-generated tool: {tool_name}."""\n\n'

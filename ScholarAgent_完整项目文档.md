@@ -24,9 +24,10 @@
 ### 1.1 项目背景
 
 学术研究人员在进行文献调研时面临以下痛点：
-- 需要在多个数据库（arXiv、Semantic Scholar、OpenAlex）之间切换搜索
+- 需要在多个数据库（arXiv、Semantic Scholar、OpenAlex、Web of Science）之间切换搜索
 - 论文数量庞大，筛选和分析耗时
 - 综述撰写需要大量人工整理
+- 中文术语、缩写和中英混合主题在英文数据库中的检索质量不稳定
 - 缺乏智能化的研究辅助工具
 
 ### 1.2 项目目标
@@ -42,11 +43,11 @@
 | 类别 | 技术 |
 |------|------|
 | 编程语言 | Python 3.11+ |
-| LLM集成 | 10种国产大模型（硅基流动、智谱AI、阿里百炼等） |
-| 学术API | arXiv、OpenAlex、Semantic Scholar |
+| LLM集成 | 多Provider统一接入（SCNet、硅基流动、智谱AI、DeepSeek 等） |
+| 学术API | arXiv、OpenAlex、Semantic Scholar、Web of Science Starter API |
 | Web框架 | Gradio 6.x |
 | 数据库 | SQLite（长期记忆） |
-| 向量检索 | 自研RAG系统（TF-IDF + BM25混合） |
+| 检索与RAG | LLM查询重写 + TF-IDF/BM25混合检索 + CRAG式验证 |
 
 ### 1.4 项目规模
 
@@ -68,10 +69,22 @@ Python文件: 48个
 | **任务分层与LLM分级** | 5级任务复杂度 × 3级LLM能力匹配 | `planning/task_hierarchy.py` |
 | **白名单管理** | 动态控制Agent可调用的工具范围 | `whitelist/manager.py` |
 | **工具自演化** | LLM自动生成新工具代码 | `evolution/tool_generator.py` |
-| **白盒过程追踪** | 完整记录推理链路，可视化展示 | `whitebox/tracer.py` |
+| **白盒过程追踪** | 完整记录推理链路，并在前端实时展示执行时间线 | `whitebox/tracer.py` |
 | **反馈与人机协作** | 用户反馈收集与学习 | `feedback/collector.py` |
 | **长期记忆系统** | 跨会话知识积累与检索 | `memory/manager.py` |
 | **Prompt模板库** | 可复用的提示词管理 | `prompt_templates/manager.py` |
+
+### 2.1.1 最近新增能力
+
+- `Web of Science Starter API` 已接入统一搜索链路，与 `arXiv / OpenAlex / Semantic Scholar` 一起参与聚合排序。
+- 查询重写已从“静态术语词表改写”升级为“LLM 输出结构化重写计划”，同时生成 `english_query / external_queries / local_queries`。
+- Gradio 右侧新增实时执行时间线，不再只展示原始 JSON。
+- 每次 LLM 调用会在 trace 中记录 `purpose / provider / model / latency / error`，前端可直接看到实际命中的模型。
+- OpenAI 兼容 provider 的 `base_url` 会统一规范到完整 `chat/completions` endpoint，减少接口地址配置错误。
+- `MemoryManager` 与 `HybridRetriever` 已改为按次创建 SQLite 连接，兼容 Gradio worker thread。
+- trace 每次写盘前都会确保 `logs/traces` 目录存在，避免目录缺失导致写盘失败。
+- 前端时间线中的同一次 `llm started / completed` 会按 `call_id` 合并成一张卡片，并支持滚动查看。
+- 长文写作与质量增强使用单独的长输出 token 配置，减少综述正文中途截断。
 
 ### 2.2 支持的任务类型
 
@@ -94,6 +107,11 @@ SUPPORTED_INTENTS = [
 | ⚡ 快速模式 | search → write | 15-30秒 |
 | 📝 标准模式 | search → analyze → debate → write | 30-60秒 |
 | 📚 完整模式 | 标准流程 + MoA + MPSC质量增强 | 60-120秒 |
+
+说明：
+
+- `quality_mode=True` 只有在 `fast_mode=False` 时才会真正进入 `FULL` 执行模式。
+- trace 中 `planning.task_config` 记录的是任务规划器给出的建议配置；实际运行模式由 `AgentV2.set_mode()` 决定，并写入 trace metadata 的 `mode`。
 
 ---
 
@@ -140,10 +158,10 @@ SUPPORTED_INTENTS = [
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                        工具与服务层                              │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐           │
-│  │  arXiv   │ │ OpenAlex │ │ Semantic │ │   PDF    │           │
-│  │   API    │ │   API    │ │ Scholar  │ │  Parser  │           │
-│  └──────────┘ └──────────┘ └──────────┘ └──────────┘           │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────┐ │
+│  │  arXiv   │ │ OpenAlex │ │ Semantic │ │   WoS    │ │  PDF  │ │
+│  │   API    │ │   API    │ │ Scholar  │ │ Starter  │ │Parser │ │
+│  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └───────┘ │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐           │
 │  │   RAG    │ │ 长期记忆 │ │ 白盒追踪 │ │ 工具注册 │           │
 │  │ Retriever│ │  SQLite  │ │  Tracer  │ │ Registry │           │
@@ -154,10 +172,10 @@ SUPPORTED_INTENTS = [
 ┌─────────────────────────────────────────────────────────────────┐
 │                        LLM Provider层                           │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐           │
-│  │ 硅基流动 │ │  智谱AI  │ │ 阿里百炼 │ │ DeepSeek │  ...      │
-│  │DeepSeek  │ │ GLM-4    │ │  Qwen    │ │          │           │
+│  │  SCNet   │ │ 硅基流动 │ │  智谱AI  │ │ DeepSeek │  ...      │
+│  │MiniMax   │ │DeepSeek  │ │  GLM-4   │ │          │           │
 │  └──────────┘ └──────────┘ └──────────┘ └──────────┘           │
-│                    智能故障转移 + 健康检查                       │
+│         智能故障转移 + 健康检查 + 模型调用Trace绑定             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -253,9 +271,10 @@ scholar-agent/
 │   ├── 📁 tools/                # 工具系统（1,579行）
 │   │   ├── __init__.py
 │   │   ├── registry.py          # 工具注册中心
-│   │   ├── arxiv_tool.py        # arXiv API（含中英文关键词转换）
-│   │   ├── openalex_tool.py     # OpenAlex API（含相关性过滤）
+│   │   ├── arxiv_tool.py        # arXiv API
+│   │   ├── openalex_tool.py     # OpenAlex API
 │   │   ├── semantic_scholar_tool.py  # Semantic Scholar API
+│   │   ├── web_of_science_tool.py    # Web of Science Starter API
 │   │   └── pdf_tool.py          # PDF解析工具
 │   │
 │   ├── 📁 reasoning/            # 推理引擎（571行）
@@ -309,7 +328,7 @@ scholar-agent/
 │   │
 │   └── 📁 ui/                   # 用户界面（~350行）
 │       ├── __init__.py
-│       └── gradio_app.py        # Gradio Web界面
+│       └── gradio_app.py        # Gradio Web界面 + 实时执行时间线
 │
 ├── 📁 data/                     # 数据目录
 │   ├── prompts/                 # Prompt模板文件
@@ -387,26 +406,28 @@ scholar-agent/
 ```python
 class LLMManager:
     """
-    统一管理10种国产LLM提供商
+    统一管理多家兼容 OpenAI Chat Completions 的 Provider
     - 智能故障转移
     - 健康检查与自动恢复
-    - 负载均衡
+    - Trace 绑定与模型调用可观测性
     """
-    
+
     def __init__(self):
-        self.providers = {}           # Provider实例
-        self.available_providers = [] # 可用Provider列表
-        self._failure_counts = {}     # 故障计数
-        self._failure_threshold = 3   # 连续失败阈值
-        self._recovery_time = 300     # 恢复时间(秒)
+        self.providers = {"mock": MockProvider()}
+        self.provider_status = {"mock": ProviderStatus()}
+        self._failure_threshold = 3
+        self._recovery_time = 300
+        self._trace_id_var = ContextVar("llm_trace_id", default="")
+        self._tracer_var = ContextVar("llm_tracer", default=None)
 ```
 
 #### 5.1.2 支持的LLM提供商
 
 | 提供商 | 模型 | 免费额度 | 优先级 |
 |--------|------|----------|--------|
+| SCNet | MiniMax-M2.5 | 依账号配置 | ⭐⭐⭐⭐ |
 | 硅基流动 | DeepSeek-V3 | 2000万Token | ⭐⭐⭐ |
-| 智谱AI | GLM-4-Flash | 完全免费 | ⭐⭐⭐ |
+| 智谱AI | GLM-4.7 | 完全免费 | ⭐⭐⭐ |
 | 阿里百炼 | Qwen-Turbo | 100万Token | ⭐⭐ |
 | 百度千帆 | ERNIE-Speed | 免费 | ⭐⭐ |
 | 腾讯混元 | Hunyuan-Lite | 免费 | ⭐ |
@@ -430,19 +451,74 @@ def call_with_fallback(self, prompt: str, **kwargs) -> str:
     6. 全部失败使用Mock
     """
     healthy_providers = self._get_healthy_providers()
-    
+
     for provider_name in healthy_providers:
         try:
-            result = self.providers[provider_name].call(prompt, **kwargs)
+            result = self._invoke_provider(
+                provider_name=provider_name,
+                prompt=prompt,
+                **kwargs,
+            )
             self._record_success(provider_name)
             return result
-        except Exception as e:
+        except Exception:
             self._record_failure(provider_name)
             continue
-    
-    # 最终降级到Mock
-    return self.providers["mock"].call(prompt, **kwargs)
+
+    return self._invoke_provider("mock", prompt=prompt, **kwargs)
 ```
+
+#### 5.1.4 模型调用追踪
+
+当前 `LLMManager` 不再只是“返回文本”，还会把每次真实模型调用写入 trace：
+
+```python
+tracer.trace_step(
+    trace_id,
+    "llm",
+    {
+        "call_id": call_id,
+        "purpose": purpose,
+        "requested_provider": requested_provider or "auto",
+        "prompt_preview": prompt[:240],
+    },
+    {
+        "status": "running|success|error",
+        "provider": provider.name,
+        "model": provider.model,
+        "latency_ms": latency_ms,
+        "error": error,
+    },
+)
+```
+
+这使前端可以实时展示：
+
+- 当前这次调用要做什么，例如 `查询改写`、`论文分析`、`综述写作`
+- 实际命中的 `provider / model`
+- 调用耗时和失败信息
+
+#### 5.1.5 Provider配置与响应解析
+
+为兼容不同 OpenAI 风格 provider 的返回体与 endpoint 习惯，`LLMManager` 还处理了两类运行时问题：
+
+```python
+def _resolve_chat_completions_url(base_url: str) -> str:
+    normalized = base_url.strip().rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        return normalized
+    return f"{normalized}/chat/completions"
+
+def _extract_response_text(body: Dict[str, Any]) -> Optional[str]:
+    # 兼容 message.content / legacy text / output_text / output block list
+```
+
+这两部分分别解决：
+
+- provider 只配置根 URL 时，自动补全到 `chat/completions`
+- 某些模型返回 `content=None`、内容块列表或 `output_text` 时，仍能正确提取文本
+
+因此 `Analyze / Write / Quality` 等上游模块拿到的是“已解析完成的文本”，而不是原始响应体。
 
 ### 5.2 Multi-Agent协作 (`src/agents/multi_agent.py`)
 
@@ -450,7 +526,7 @@ def call_with_fallback(self, prompt: str, **kwargs) -> str:
 
 ```python
 class SearchAgent:
-    """多源论文搜索，聚合arXiv/OpenAlex/Semantic Scholar"""
+    """多源论文搜索，聚合 arXiv / OpenAlex / Semantic Scholar / Web of Science"""
     
 class AnalyzeAgent:
     """论文深度分析，提取核心贡献与方法"""
@@ -472,17 +548,45 @@ class MultiAgentCoordinator:
     # 完整流程（默认）
     intent_flows_full = {
         "generate_survey": ["search", "analyze", "debate", "write"],
-        "compare_methods": ["search", "analyze", "debate"],
-        "generate_code": ["search", "coder"],
+        "compare_methods": ["search", "analyze", "debate", "write"],
+        "generate_code": ["search", "analyze", "coder"],
+        "search_papers": ["search", "write"],
     }
-    
+
     # 快速流程
     intent_flows_fast = {
         "generate_survey": ["search", "write"],
-        "compare_methods": ["search", "analyze"],
+        "compare_methods": ["search", "write"],
         "generate_code": ["coder"],
+        "search_papers": ["search", "write"],
     }
 ```
+
+#### 5.2.3 LLM驱动查询重写与多源检索
+
+`SearchAgent` 现在不会直接把用户原始中文问题丢给英文数据库，而是先调用 `QueryRewriter` 生成结构化检索计划：
+
+```python
+rewritten_queries = self.rewriter.rewrite(
+    topic,
+    intent=intent,
+    target="external",
+)
+```
+
+`QueryRewriter` 会通过一次 `LLM.call_json()` 输出：
+
+- `core_topic`
+- `english_query`
+- `external_queries`
+- `local_queries`
+
+其中：
+
+- `external_queries` 用于 `arXiv / OpenAlex / Semantic Scholar / Web of Science`
+- `local_queries` 用于本地 RAG 检索
+
+这样中文术语、缩写和中英混合主题会优先被改写成更适合英文数据库的标准学术检索式。
 
 ### 5.3 任务分层 (`src/planning/task_hierarchy.py`)
 
@@ -646,6 +750,28 @@ def recall(self, query: str, memory_type: MemoryType = None,
     return self._merge_and_rank(vector_results, keyword_results, limit)
 ```
 
+#### 5.6.4 线程与落盘行为
+
+当前长期记忆与本地 RAG 的 SQLite 访问都改成了“按次连接、按次提交”的模式：
+
+```python
+def _connect(self) -> sqlite3.Connection:
+    conn = sqlite3.connect(self.db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+```
+
+这样做的直接原因是：
+
+- Gradio 的提交处理运行在 worker thread 中
+- 如果复用主线程里创建的 SQLite 连接，会触发 `SQLite objects created in a thread can only be used in that same thread`
+
+目前的落盘位置分别是：
+
+- 长期记忆：`data/memory/memory.db`
+- RAG 索引：`data/memory/rag_index.db`
+- trace：`logs/traces/<trace_id>.json`
+
 ---
 
 ## 6. 关键技术与难点
@@ -677,29 +803,27 @@ class LLMProvider(ABC):
 
 #### 挑战2：中文学术搜索质量差
 
-**问题**：用中文"强化学习"搜索，返回"党建学习"等不相关结果
+**问题**：中文术语、缩写和中英混合表达在英文数据库中的检索质量差，例如 `SERF效应`、`多智能体强化学习综述`
 
 **解决方案**：
 ```python
-# 1. 中英文关键词映射
-TOPIC_KEYWORDS = {
-    "强化学习": "reinforcement learning",
-    "深度学习": "deep learning",
-    # ...
-}
+raw = self.llm.call_json(
+    rewrite_prompt,
+    purpose="查询改写",
+)
 
-# 2. 学科分类过滤
-TOPIC_CATEGORIES = {
-    "强化学习": ["cs.LG", "cs.AI"],
-}
-
-# 3. 相关性二次检查
-def _parse_work(work, search_query):
-    # 检查标题/摘要是否包含关键词
-    if not any(term in title_lower or term in abstract_lower 
-               for term in query_terms):
-        return None  # 过滤不相关论文
+english_query = raw["english_query"]
+external_queries = raw["external_queries"]
+local_queries = raw["local_queries"]
 ```
+
+当前链路不再依赖静态中英文词表，而是：
+
+1. 用 LLM 提炼 `core_topic`
+2. 生成英文主检索式 `english_query`
+3. 生成外部数据库检索集合 `external_queries`
+4. 生成本地 RAG 检索集合 `local_queries`
+5. 结果返回后再做标题/摘要相关性检查
 
 #### 挑战3：综述生成时间过长
 
@@ -747,7 +871,7 @@ def fill_slots_once(self, query, intent):
 
 ```python
 class WhiteboxTracer:
-    """记录完整推理过程"""
+    """记录完整推理过程与模型调用过程"""
     
     def trace_step(self, step_type, input_data, output_data, metadata):
         self.steps.append({
@@ -762,6 +886,26 @@ class WhiteboxTracer:
         """返回完整推理链，可视化展示"""
         return self.steps
 ```
+
+当前白盒追踪已经分成两层：
+
+- 业务步骤：`memory_recall / intent / slots / planning / search / analyze / debate / write / quality`
+- 模型步骤：`llm`
+
+其中 `llm` 步骤会额外记录：
+
+- `purpose`
+- `provider`
+- `model`
+- `latency_ms`
+- `error`
+
+Gradio 前端会实时轮询 trace，并将这些步骤渲染成右侧执行时间线，而不再只展示 JSON。前端展示层还会：
+
+- 将同一次 `llm started / completed` 按 `call_id` 合并成一条可视步骤
+- 在运行中显示“这次模型调用要做什么”
+- 完成后直接替换为 `provider / model / latency`
+- 将时间线放入固定高度滚动容器，便于长链路观察
 
 ---
 
@@ -871,27 +1015,103 @@ class DialogueState:
 
 #### 问题5：搜索结果不精准
 
-**现象**：搜索"强化学习"返回"强化党组织学习建设"等不相关结果
+**现象**：中文问题直接搜索英文数据库时，容易召回主题漂移的结果
 
 **原因**：
-1. 中文搜索在英文数据库效果差
-2. 没有学科过滤
-3. 没有相关性检查
+1. 用户原始输入不是学术检索式
+2. 中文/缩写/中英混合主题没有被结构化展开
+3. 外部源返回后缺少统一相关性过滤
 
 **解决**：
 ```python
-# 1. 中英文映射
-if "强化学习" in query:
-    query = "reinforcement learning"
+# 1. 先做 LLM 查询重写
+queries = self.rewriter.rewrite(query, intent=intent, target="external")
 
-# 2. 添加学科过滤
-params["filter"] = "type:article|review|preprint,has_abstract:true"
+# 2. 用多个变体搜索外部学术源
+for rewritten in queries[:3]:
+    papers = TOOL_REGISTRY.call(tool_name, query=rewritten, ...)
 
-# 3. 相关性检查
-def is_relevant(title, abstract, keywords):
-    return any(kw in title.lower() or kw in abstract.lower() 
-               for kw in keywords)
+# 3. 对标题/摘要做相关性检查
+if query_terms and not any(term in text for term in query_terms):
+    return None
 ```
+
+#### 问题6：Gradio 中 SQLite 跨线程报错
+
+**现象**：
+```
+sqlite3.ProgrammingError: SQLite objects created in a thread can only be used in that same thread
+```
+
+**原因**：
+`MemoryManager` 和 `HybridRetriever` 早期持有长生命周期连接，而 Gradio 事件处理运行在 worker thread。
+
+**解决**：
+```python
+def _connect(self) -> sqlite3.Connection:
+    conn = sqlite3.connect(self.db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+with self._connect() as conn:
+    rows = conn.execute(sql, params).fetchall()
+```
+
+即每次数据库操作单独创建连接，不跨线程复用连接对象。
+
+#### 问题7：模型返回 `content=None` 导致上游崩溃
+
+**现象**：
+```
+TypeError: 'NoneType' object is not subscriptable
+```
+
+**原因**：
+部分 provider 的返回不是简单字符串，而可能是：
+
+- `message.content = null`
+- 内容块列表
+- `output_text`
+
+**解决**：
+```python
+def _extract_response_text(body: Dict[str, Any]) -> Optional[str]:
+    # 统一兼容多种响应格式
+```
+
+如果仍然提取不到文本，则把这次 provider 调用视为失败，由 `LLMManager` 继续上抛或切换 provider，而不是把 `None` 传给业务层。
+
+#### 问题8：trace 目录缺失导致写盘失败
+
+**现象**：
+```
+FileNotFoundError: .../logs/traces/<trace_id>.json
+```
+
+**解决**：
+```python
+def _persist(self, trace_id: str) -> None:
+    self.storage_dir.mkdir(parents=True, exist_ok=True)
+    path = self.storage_dir / f"{trace_id}.json"
+    path.write_text(...)
+```
+
+每次写 trace 前都重新确保目录存在。
+
+#### 问题9：综述长文本在 `final_output` 中被截断
+
+**现象**：
+正文写到中途停止，trace 中 `final_output.answer` 只保存到半句。
+
+**原因**：
+写作调用复用了默认 `max_tokens`，不足以支撑长篇综述输出。
+
+**解决**：
+```python
+llm_long_output_max_tokens: int = 32000
+```
+
+并让 `WriteAgent` 与质量增强阶段的长文生成显式使用这组长输出配置。
 
 ### 7.2 性能优化历程
 
@@ -913,7 +1133,7 @@ def is_relevant(title, abstract, keywords):
 > **核心亮点**：
 > - 多Agent协作（搜索、分析、写作专业分工）
 > - 7种推理模式（CoT、辩论、反思等）
-> - 10种国产LLM智能切换
+> - 多Provider LLM 智能切换，并实时展示模型调用
 > 
 > 项目代码1.5万行，实现了任务分层、白盒追踪、长期记忆等7大高级特性。
 
@@ -929,16 +1149,16 @@ def is_relevant(title, abstract, keywords):
 > 1. **预处理层**：意图识别 + 槽位填充，理解用户需求
 > 2. **Agent层**：5个专业Agent分工协作（搜索、分析、辩论、写作、编码）
 > 3. **推理层**：7种推理模式，根据任务复杂度自动选择
-> 4. **LLM层**：10种国产大模型，智能故障转移
+> 4. **LLM层**：多Provider统一接入，智能故障转移，并写入模型调用 trace
 > 
 > **核心技术**：
 > - 任务分层：5级复杂度 × 3级LLM能力匹配
 > - 质量增强：Self-MoA多模型聚合 + MPSC自洽验证
-> - 白盒追踪：完整记录推理过程，可解释可审计
+> - 白盒追踪：完整记录推理过程与模型调用，可解释可审计
 > 
 > **技术难点**：
-> - 中文学术搜索质量差 → 中英文关键词映射 + 相关性过滤
-> - 多LLM统一管理 → 抽象接口 + 智能故障转移
+> - 中文学术搜索质量差 → LLM结构化查询重写 + 相关性过滤
+> - 多LLM统一管理 → 抽象接口 + 智能故障转移 + 模型调用追踪
 > - 响应时间过长 → 多模式设计（快速/标准/完整）
 > 
 > **项目成果**：
@@ -953,7 +1173,7 @@ def is_relevant(title, abstract, keywords):
 > 这是我独立开发的智能学术研究助手ScholarAgent，解决研究人员文献调研的痛点。
 > 
 > **核心功能**：
-> - 多源论文搜索（arXiv、OpenAlex、Semantic Scholar）
+> - 多源论文搜索（arXiv、OpenAlex、Semantic Scholar、Web of Science）
 > - 智能分析对比
 > - 自动综述生成
 > - 代码实现生成
@@ -968,12 +1188,12 @@ def is_relevant(title, abstract, keywords):
 > 采用分层架构设计：
 > 
 > **用户界面层**：
-> Gradio Web界面，支持多轮对话，实时显示推理过程
+> Gradio Web界面，支持多轮对话，右侧实时显示执行时间线与步骤详情
 > 
 > **预处理层**：
 > - 意图分类：8种任务类型识别
 > - 槽位填充：一次性收集所有必需信息
-> - 查询重写：优化搜索关键词
+> - 查询重写：LLM输出结构化检索计划
 > 
 > **核心Agent层**：
 > 5个专业Agent协作：
@@ -991,7 +1211,7 @@ def is_relevant(title, abstract, keywords):
 > - MPSC：多路径自洽验证
 > 
 > **LLM管理**：
-> 10种国产大模型，智能故障转移，健康检查与自动恢复
+> 多Provider统一接入，智能故障转移，健康检查与自动恢复，并记录模型调用 trace
 
 #### 第三部分：关键技术（1.5分钟）
 
@@ -1004,9 +1224,9 @@ def is_relevant(title, abstract, keywords):
 > 
 > 遇到的问题：搜索"强化学习"返回"党建学习"。
 > 解决方案：
-> 1. 中英文关键词自动映射
-> 2. 学科分类过滤（cs.LG, cs.AI）
-> 3. 相关性二次检查
+> 1. LLM生成 `english_query / external_queries / local_queries`
+> 2. 用英文主检索式搜索外部数据库
+> 3. 返回结果后做相关性二次检查
 > 
 > **技术亮点3：智能故障转移**
 > 
@@ -1021,8 +1241,8 @@ def is_relevant(title, abstract, keywords):
 > 完整记录每一步推理过程，包括：
 > - 输入输出
 > - 时间戳
-> - Token消耗
 > - 推理模式
+> - 模型调用用途、provider、model、耗时和错误信息
 > 
 > 支持可视化展示，便于调试和审计。
 
@@ -1170,6 +1390,13 @@ source venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
 ```
 
+如果本地已经有 `agent` conda 环境，也可以直接：
+
+```bash
+source /home/a1/miniconda3/etc/profile.d/conda.sh
+conda activate agent
+```
+
 ### 9.2 配置API密钥
 
 编辑 `api_keys.py`：
@@ -1177,14 +1404,23 @@ pip install -r requirements.txt
 ```python
 API_KEYS = {
     # 必填（至少一个）
+    "SCNET_API_KEY": "sk-xxx",
     "SILICONFLOW_API_KEY": "sk-xxx",  # 推荐，2000万Token免费
     "ZHIPU_API_KEY": "xxx",            # 完全免费
     
     # 可选
+    "WOS_STARTER_API_KEY": "xxx",      # Web of Science Starter API
     "DASHSCOPE_API_KEY": "",
     "DEEPSEEK_API_KEY": "",
     # ...
 }
+```
+
+`Web of Science` 相关可选环境变量：
+
+```bash
+export WOS_DOCUMENTS_URL="https://api.clarivate.com/apis/wos-starter/v1/documents"
+export WOS_DATABASE="WOS"
 ```
 
 ### 9.3 启动服务
@@ -1219,7 +1455,9 @@ Agent: 正在搜索...找到25篇论文
 用户: 写一篇关于强化学习的综述
 Agent: 请提供时间范围（如：2020-2024）
 用户: 最近3年
-Agent: [搜索论文] → [分析核心贡献] → [多视角辩论] → [生成综述]
+Agent: [memory_recall] → [intent] → [slots] → [planning]
+       → [search] → [llm: 查询改写] → [analyze]
+       → [debate] → [write] → [llm: 综述写作]
        
        # 强化学习研究综述 (2022-2025)
        
@@ -1255,6 +1493,13 @@ agent.set_mode(fast_mode=True, enable_quality_enhance=False)
 # 对话
 response = agent.chat("搜索深度学习论文", session_id="user_123")
 print(response)
+
+# 若需要在前端/服务层拿到 trace_id
+response = agent.chat(
+    "写一篇 SERF 效应的综述",
+    session_id="user_123",
+    on_trace_start=lambda trace_id: print(trace_id),
+)
 
 # 获取状态
 status = agent.get_status()
@@ -1354,7 +1599,8 @@ scikit-learn>=1.2.0
 | v1.1 | 2026-01-10 | 7大高级特性 |
 | v1.2 | 2026-01-10 | Bug修复 + Gradio 6.x兼容 |
 | v2.0 | 2026-01-11 | 性能优化 + 搜索质量提升 |
+| v2.1 | 2026-03-26 | Web of Science 接入 + LLM查询改写 + 实时执行时间线 + 模型调用可视化 |
 
 ---
 
-*文档版本: 2.0 | 最后更新: 2026-01-11*
+*文档版本: 2.1 | 最后更新: 2026-03-26*

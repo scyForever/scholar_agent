@@ -327,7 +327,7 @@ class HybridRetriever:
             '{"label":"correct|incorrect|ambiguous","reason":"..."}\n'
             f"查询：{query}\n片段：{content[:800]}"
         )
-        result = self.llm.call_json(prompt)
+        result = self.llm.call_json(prompt, purpose="RAG相关性判断")
         label = str(result.get("label", "")).lower()
         if label in {"correct", "ambiguous"}:
             return True

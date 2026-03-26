@@ -100,7 +100,7 @@ class AnalyzeAgent:
                 abstract=paper.abstract,
                 context=f"来源：{paper.source}, 年份：{paper.year}, 引用数：{paper.citations}",
             )
-            raw = self.llm.call(prompt)
+            raw = self.llm.call(prompt, purpose="论文分析")
             analyses.append(
                 PaperAnalysis(
                     paper=paper,
@@ -175,7 +175,11 @@ class WriteAgent:
                 topic=query,
                 materials=materials,
             )
-            answer = self.llm.call(prompt, max_tokens=settings.llm_long_output_max_tokens)
+            answer = self.llm.call(
+                prompt,
+                max_tokens=settings.llm_long_output_max_tokens,
+                purpose="综述写作",
+            )
         self.tracer.trace_step(trace_id, "write", {"intent": intent}, {"answer_preview": answer[:500]})
         return answer
 
@@ -213,7 +217,7 @@ class CoderAgent:
             for analysis in analyses
         )
         prompt = self.templates.render("code_generation", topic=query, materials=materials)
-        answer = self.llm.call(prompt)
+        answer = self.llm.call(prompt, purpose="代码生成")
         self.tracer.trace_step(trace_id, "coder", {"query": query}, {"answer_preview": answer[:500]})
         return answer
 

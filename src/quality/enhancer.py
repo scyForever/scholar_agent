@@ -25,6 +25,7 @@ class QualityEnhancer:
                         f"问题：{query}\n上下文：{context}\n请给出你的最佳回答。",
                         provider=provider,
                         max_tokens=settings.llm_long_output_max_tokens,
+                        purpose=f"质量增强候选-{provider}",
                     )
                 )
         else:
@@ -34,6 +35,7 @@ class QualityEnhancer:
                         f"问题：{query}\n上下文：{context}\n请给出你的最佳回答。",
                         temperature=temperature,
                         max_tokens=settings.llm_long_output_max_tokens,
+                        purpose="质量增强候选",
                     )
                 )
 
@@ -41,14 +43,18 @@ class QualityEnhancer:
             "你将收到多个候选答案，请聚合其共同结论，保留差异点，并输出更强的最终答案。\n"
             f"问题：{query}\n候选答案：\n" + "\n\n".join(candidates)
         )
-        answer = self.llm.call(aggregate_prompt, max_tokens=settings.llm_long_output_max_tokens)
+        answer = self.llm.call(
+            aggregate_prompt,
+            max_tokens=settings.llm_long_output_max_tokens,
+            purpose="质量增强聚合",
+        )
         return MoAResult(answer=answer, candidates=candidates, rationale="Aggregated candidate responses.", score=0.82)
 
     def mpsc_verify(self, query: str, answer: str) -> VerificationResult:
         paths = [
-            self.llm.call(f"请从理论角度验证以下回答是否成立。\n问题：{query}\n回答：{answer}"),
-            self.llm.call(f"请从实验与证据角度验证以下回答是否成立。\n问题：{query}\n回答：{answer}"),
-            self.llm.call(f"请从限制条件与边界情况角度验证以下回答是否成立。\n问题：{query}\n回答：{answer}"),
+            self.llm.call(f"请从理论角度验证以下回答是否成立。\n问题：{query}\n回答：{answer}", purpose="质量校验-理论"),
+            self.llm.call(f"请从实验与证据角度验证以下回答是否成立。\n问题：{query}\n回答：{answer}", purpose="质量校验-证据"),
+            self.llm.call(f"请从限制条件与边界情况角度验证以下回答是否成立。\n问题：{query}\n回答：{answer}", purpose="质量校验-边界"),
         ]
 
         vectorizer = TfidfVectorizer()

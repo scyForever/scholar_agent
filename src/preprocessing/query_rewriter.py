@@ -126,6 +126,7 @@ class QueryRewriter:
             self._rewrite_prompt(normalized_query, intent),
             temperature=0.0,
             max_tokens=500,
+            purpose="查询改写",
         )
         plan = self._parse_plan(raw, normalized_query)
         self._rewrite_cache[cache_key] = plan

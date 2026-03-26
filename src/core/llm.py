@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import time
 from abc import ABC, abstractmethod
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -106,6 +107,7 @@ class LLMProvider(ABC):
         temperature: float = 0.2,
         max_tokens: int = 1024,
         response_format: str = "text",
+        purpose: str = "",
     ) -> str:
         raise NotImplementedError
 
@@ -123,6 +125,7 @@ class OpenAICompatibleProvider(LLMProvider):
         temperature: float = 0.2,
         max_tokens: int = 1024,
         response_format: str = "text",
+        purpose: str = "",
     ) -> str:
         messages: List[Dict[str, str]] = []
         if system_prompt:
@@ -143,6 +146,7 @@ class OpenAICompatibleProvider(LLMProvider):
             "Content-Type": "application/json",
         }
 
+        _ = purpose
         last_error: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
             try:
@@ -187,8 +191,9 @@ class MockProvider(LLMProvider):
         temperature: float = 0.2,
         max_tokens: int = 1024,
         response_format: str = "text",
+        purpose: str = "",
     ) -> str:
-        _ = (system_prompt, temperature, max_tokens)
+        _ = (system_prompt, temperature, max_tokens, purpose)
         if response_format == "json":
             return json.dumps(
                 {
@@ -210,7 +215,23 @@ class LLMManager:
         self.provider_status: Dict[str, ProviderStatus] = {"mock": ProviderStatus()}
         self._failure_threshold = settings.llm_failure_threshold
         self._recovery_time = settings.llm_recovery_time
+        self._trace_id_var: ContextVar[str] = ContextVar("llm_trace_id", default="")
+        self._tracer_var: ContextVar[Any] = ContextVar("llm_tracer", default=None)
+        self._call_index_var: ContextVar[int] = ContextVar("llm_call_index", default=0)
         self._init_providers()
+
+    def bind_trace(self, tracer: Any, trace_id: str) -> Tuple[Token[str], Token[Any], Token[int]]:
+        return (
+            self._trace_id_var.set(trace_id),
+            self._tracer_var.set(tracer),
+            self._call_index_var.set(0),
+        )
+
+    def reset_trace(self, tokens: Tuple[Token[str], Token[Any], Token[int]]) -> None:
+        trace_id_token, tracer_token, call_index_token = tokens
+        self._trace_id_var.reset(trace_id_token)
+        self._tracer_var.reset(tracer_token)
+        self._call_index_var.reset(call_index_token)
 
     def _init_providers(self) -> None:
         for name, cfg in settings.provider_configs.items():
@@ -238,14 +259,20 @@ class LLMManager:
         temperature: float = 0.2,
         max_tokens: int = 1024,
         response_format: str = "text",
+        purpose: str = "",
     ) -> str:
         if provider:
-            return self.providers[provider].call(
-                prompt,
+            return self._invoke_provider(
+                provider_name=provider,
+                prompt=prompt,
                 system_prompt=system_prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 response_format=response_format,
+                purpose=purpose,
+                requested_provider=provider,
+                attempt=1,
+                fallback=False,
             )
         return self.call_with_fallback(
             prompt,
@@ -253,6 +280,7 @@ class LLMManager:
             temperature=temperature,
             max_tokens=max_tokens,
             response_format=response_format,
+            purpose=purpose,
         )
 
     def call_with_fallback(
@@ -263,27 +291,38 @@ class LLMManager:
         temperature: float = 0.2,
         max_tokens: int = 1024,
         response_format: str = "text",
+        purpose: str = "",
     ) -> str:
-        for provider_name in self._get_healthy_providers():
-            provider = self.providers[provider_name]
+        healthy_providers = self._get_healthy_providers()
+        for attempt, provider_name in enumerate(healthy_providers, start=1):
             try:
-                result = provider.call(
-                    prompt,
+                result = self._invoke_provider(
+                    provider_name=provider_name,
+                    prompt=prompt,
                     system_prompt=system_prompt,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     response_format=response_format,
+                    purpose=purpose,
+                    requested_provider=None,
+                    attempt=attempt,
+                    fallback=len(healthy_providers) > 1,
                 )
                 self._record_success(provider_name)
                 return result
             except Exception:
                 self._record_failure(provider_name)
-        return self.providers["mock"].call(
-            prompt,
+        return self._invoke_provider(
+            provider_name="mock",
+            prompt=prompt,
             system_prompt=system_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
             response_format=response_format,
+            purpose=purpose,
+            requested_provider=None,
+            attempt=len(healthy_providers) + 1,
+            fallback=True,
         )
 
     def call_json(
@@ -294,6 +333,7 @@ class LLMManager:
         system_prompt: Optional[str] = None,
         temperature: float = 0.1,
         max_tokens: int = 1024,
+        purpose: str = "",
     ) -> Dict[str, Any]:
         raw = self.call(
             prompt,
@@ -302,6 +342,7 @@ class LLMManager:
             temperature=temperature,
             max_tokens=max_tokens,
             response_format="json",
+            purpose=purpose,
         )
         try:
             return json.loads(raw)
@@ -351,3 +392,128 @@ class LLMManager:
     def reset_failures(self, provider_name: str) -> None:
         if provider_name in self.provider_status:
             self.provider_status[provider_name] = ProviderStatus()
+
+    def _invoke_provider(
+        self,
+        provider_name: str,
+        prompt: str,
+        *,
+        system_prompt: Optional[str],
+        temperature: float,
+        max_tokens: int,
+        response_format: str,
+        purpose: str,
+        requested_provider: Optional[str],
+        attempt: int,
+        fallback: bool,
+    ) -> str:
+        provider = self.providers[provider_name]
+        call_id = self._next_call_id()
+        self._trace_llm_event(
+            call_id=call_id,
+            phase="started",
+            status="running",
+            provider=provider,
+            prompt=prompt,
+            response_format=response_format,
+            max_tokens=max_tokens,
+            purpose=purpose,
+            requested_provider=requested_provider,
+            attempt=attempt,
+            fallback=fallback,
+        )
+        started = time.perf_counter()
+        try:
+            result = provider.call(
+                prompt,
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=response_format,
+                purpose=purpose,
+            )
+            self._trace_llm_event(
+                call_id=call_id,
+                phase="completed",
+                status="success",
+                provider=provider,
+                prompt=prompt,
+                response_format=response_format,
+                max_tokens=max_tokens,
+                purpose=purpose,
+                requested_provider=requested_provider,
+                attempt=attempt,
+                fallback=fallback,
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+                response_preview=result[:240],
+            )
+            return result
+        except Exception as exc:
+            self._trace_llm_event(
+                call_id=call_id,
+                phase="completed",
+                status="error",
+                provider=provider,
+                prompt=prompt,
+                response_format=response_format,
+                max_tokens=max_tokens,
+                purpose=purpose,
+                requested_provider=requested_provider,
+                attempt=attempt,
+                fallback=fallback,
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+                error=str(exc)[:400],
+            )
+            raise
+
+    def _next_call_id(self) -> int:
+        call_id = self._call_index_var.get() + 1
+        self._call_index_var.set(call_id)
+        return call_id
+
+    def _trace_llm_event(
+        self,
+        *,
+        call_id: int,
+        phase: str,
+        status: str,
+        provider: LLMProvider,
+        prompt: str,
+        response_format: str,
+        max_tokens: int,
+        purpose: str,
+        requested_provider: Optional[str],
+        attempt: int,
+        fallback: bool,
+        latency_ms: Optional[float] = None,
+        response_preview: str = "",
+        error: str = "",
+    ) -> None:
+        trace_id = self._trace_id_var.get()
+        tracer = self._tracer_var.get()
+        if not trace_id or tracer is None:
+            return
+
+        tracer.trace_step(
+            trace_id,
+            "llm",
+            {
+                "call_id": call_id,
+                "purpose": purpose,
+                "requested_provider": requested_provider or "auto",
+                "prompt_preview": prompt[:240],
+                "response_format": response_format,
+                "max_tokens": max_tokens,
+            },
+            {
+                "call_id": call_id,
+                "phase": phase,
+                "status": status,
+                "provider": provider.name,
+                "model": provider.model,
+                "latency_ms": round(latency_ms, 1) if latency_ms is not None else None,
+                "response_preview": response_preview,
+                "error": error,
+            },
+            metadata={"attempt": attempt, "fallback": fallback},
+        )

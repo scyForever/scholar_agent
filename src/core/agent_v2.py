@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 from src.agents.multi_agent import MultiAgentCoordinator
 from src.core.llm import LLMManager
@@ -60,97 +60,108 @@ class AgentV2:
     def index_pdf(self, pdf_path: str, title: str | None = None, metadata: Dict[str, Any] | None = None) -> str:
         return self.retriever.index_pdf(pdf_path, title=title, metadata=metadata)
 
-    def chat(self, query: str, session_id: str = "default") -> AgentResponse:
+    def chat(
+        self,
+        query: str,
+        session_id: str = "default",
+        on_trace_start: Callable[[str], None] | None = None,
+    ) -> AgentResponse:
         state = self.dialogue.get_state(session_id)
         self.dialogue.add_user_message(session_id, query)
         trace_id = self.tracer.start_trace(session_id, query, {"mode": self.execution_mode.value})
+        if on_trace_start is not None:
+            on_trace_start(trace_id)
+        trace_tokens = self.llm.bind_trace(self.tracer, trace_id)
 
-        recalled = self.memory.recall(query, user_id=session_id, limit=5)
-        memory_context = "\n".join(item.content for item in recalled)
-        self.tracer.trace_step(trace_id, "memory_recall", {"query": query}, {"count": len(recalled)})
+        try:
+            recalled = self.memory.recall(query, user_id=session_id, limit=5)
+            memory_context = "\n".join(item.content for item in recalled)
+            self.tracer.trace_step(trace_id, "memory_recall", {"query": query}, {"count": len(recalled)})
 
-        if state.missing_slots and state.intent:
-            intent = state.intent
-            current_slots = dict(state.current_slots)
-        else:
-            classified = self.intent_classifier.classify(query)
-            intent = str(classified["intent"])
-            current_slots = {}
-            self.tracer.trace_step(trace_id, "intent", {"query": query}, classified)
+            if state.missing_slots and state.intent:
+                intent = state.intent
+                current_slots = dict(state.current_slots)
+            else:
+                classified = self.intent_classifier.classify(query)
+                intent = str(classified["intent"])
+                current_slots = {}
+                self.tracer.trace_step(trace_id, "intent", {"query": query}, classified)
 
-        slot_result = self.slot_filler.fill_slots_once(query, intent, current_slots)
-        self.tracer.trace_step(trace_id, "slots", {"query": query, "intent": intent}, slot_result)
-        if slot_result["missing"]:
-            state = self.dialogue.update_state(
-                session_id,
-                intent=intent,
-                current_slots=slot_result["slots"],
-                missing_slots=slot_result["missing"],
-                last_trace_id=trace_id,
+            slot_result = self.slot_filler.fill_slots_once(query, intent, current_slots)
+            self.tracer.trace_step(trace_id, "slots", {"query": query, "intent": intent}, slot_result)
+            if slot_result["missing"]:
+                state = self.dialogue.update_state(
+                    session_id,
+                    intent=intent,
+                    current_slots=slot_result["slots"],
+                    missing_slots=slot_result["missing"],
+                    last_trace_id=trace_id,
+                )
+                answer = slot_result["ask"]
+                self.dialogue.add_assistant_message(session_id, answer)
+                self.tracer.finish_trace(trace_id, {"answer": answer})
+                return AgentResponse(
+                    answer=answer,
+                    intent=intent,
+                    slots=slot_result["slots"],
+                    trace_id=trace_id,
+                    needs_input=True,
+                    whitebox=self.tracer.get_trace(trace_id),
+                )
+
+            slots = slot_result["slots"]
+            self.dialogue.update_state(session_id, intent="", current_slots={}, missing_slots=[], last_trace_id=trace_id)
+            level, config = self.planner.classify(query, intent, slots)
+            self.tracer.trace_step(
+                trace_id,
+                "planning",
+                {"query": query, "intent": intent, "slots": slots},
+                {"task_level": level.value, "task_config": asdict(config)},
             )
-            answer = slot_result["ask"]
+
+            artifacts = self.multi_agent.execute(
+                query=query,
+                intent=intent,
+                slots=slots,
+                mode=self.execution_mode,
+                trace_id=trace_id,
+                history=self.dialogue.get_state(session_id).history,
+            )
+            answer = str(artifacts.get("answer") or "")
+
+            if not answer:
+                reasoning = self.reasoning.reason(query, memory_context, mode="auto", trace_id=trace_id)
+                answer = reasoning.answer
+                artifacts["reasoning"] = reasoning
+
+            if self.enable_quality_enhance and self.execution_mode == ExecutionMode.FULL:
+                moa_result = self.quality.self_moa(query, answer)
+                verification = self.quality.mpsc_verify(query, moa_result.answer)
+                answer = moa_result.answer
+                artifacts["moa"] = moa_result
+                artifacts["verification"] = verification
+                self.tracer.trace_step(trace_id, "quality", {"query": query}, {"verification": verification.verdict})
+
+            self.memory.store(
+                session_id,
+                f"用户问题：{query}\n系统回答：{answer}",
+                memory_type=MemoryType.CONVERSATION,
+                metadata={"intent": intent, "task_level": level.value},
+                importance=0.7,
+            )
+
             self.dialogue.add_assistant_message(session_id, answer)
-            self.tracer.finish_trace(trace_id, {"answer": answer})
+            self.tracer.finish_trace(trace_id, {"answer": answer, "intent": intent})
             return AgentResponse(
                 answer=answer,
                 intent=intent,
-                slots=slot_result["slots"],
+                slots=slots,
                 trace_id=trace_id,
-                needs_input=True,
                 whitebox=self.tracer.get_trace(trace_id),
+                artifacts=artifacts,
             )
-
-        slots = slot_result["slots"]
-        self.dialogue.update_state(session_id, intent="", current_slots={}, missing_slots=[], last_trace_id=trace_id)
-        level, config = self.planner.classify(query, intent, slots)
-        self.tracer.trace_step(
-            trace_id,
-            "planning",
-            {"query": query, "intent": intent, "slots": slots},
-            {"task_level": level.value, "task_config": asdict(config)},
-        )
-
-        artifacts = self.multi_agent.execute(
-            query=query,
-            intent=intent,
-            slots=slots,
-            mode=self.execution_mode,
-            trace_id=trace_id,
-            history=self.dialogue.get_state(session_id).history,
-        )
-        answer = str(artifacts.get("answer") or "")
-
-        if not answer:
-            reasoning = self.reasoning.reason(query, memory_context, mode="auto", trace_id=trace_id)
-            answer = reasoning.answer
-            artifacts["reasoning"] = reasoning
-
-        if self.enable_quality_enhance and self.execution_mode == ExecutionMode.FULL:
-            moa_result = self.quality.self_moa(query, answer)
-            verification = self.quality.mpsc_verify(query, moa_result.answer)
-            answer = moa_result.answer
-            artifacts["moa"] = moa_result
-            artifacts["verification"] = verification
-            self.tracer.trace_step(trace_id, "quality", {"query": query}, {"verification": verification.verdict})
-
-        self.memory.store(
-            session_id,
-            f"用户问题：{query}\n系统回答：{answer}",
-            memory_type=MemoryType.CONVERSATION,
-            metadata={"intent": intent, "task_level": level.value},
-            importance=0.7,
-        )
-
-        self.dialogue.add_assistant_message(session_id, answer)
-        self.tracer.finish_trace(trace_id, {"answer": answer, "intent": intent})
-        return AgentResponse(
-            answer=answer,
-            intent=intent,
-            slots=slots,
-            trace_id=trace_id,
-            whitebox=self.tracer.get_trace(trace_id),
-            artifacts=artifacts,
-        )
+        finally:
+            self.llm.reset_trace(trace_tokens)
 
     def submit_feedback(self, session_id: str, query: str, response: str, rating: int, comment: str = "") -> None:
         self.feedback.record_feedback(session_id, query, response, rating, comment)

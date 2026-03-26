@@ -54,7 +54,7 @@ class IntentClassifier:
             intent_options=", ".join(INTENT_SPECS),
             query=query,
         )
-        result = self.llm.call_json(prompt)
+        result = self.llm.call_json(prompt, purpose="意图识别")
         return {
             "intent": str(result.get("intent", "")),
             "confidence": float(result.get("confidence", 0.0)),
