@@ -73,6 +73,9 @@ class QueryRewriter:
         self.llm = llm or _get_default_llm_manager()
         self._rewrite_cache: Dict[Tuple[str, str], QueryRewritePlan] = {}
 
+    def plan(self, query: str, intent: str = "search_papers") -> QueryRewritePlan:
+        return self._rewrite_plan(query, intent)
+
     def normalize_topic(self, topic: str) -> str:
         return self.extract_core_topic(topic)
 

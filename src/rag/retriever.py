@@ -16,7 +16,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from config.settings import settings
 from src.core.llm import LLMManager
 from src.core.models import IndexedChunk
-from src.preprocessing.query_rewriter import QueryRewriter
+from src.preprocessing.query_rewriter import QueryRewritePlan, QueryRewriter
 from src.tools.pdf_tool import extract_pdf_text
 from src.tools.web_search_tool import search_web
 
@@ -135,10 +135,17 @@ class HybridRetriever:
             conn.commit()
         return document_id
 
-    def retrieve(self, query: str, chat_history: List[Dict[str, str]] | None = None, top_k: int | None = None) -> Dict[str, Any]:
+    def retrieve(
+        self,
+        query: str,
+        chat_history: List[Dict[str, str]] | None = None,
+        top_k: int | None = None,
+        rewritten_queries: List[str] | None = None,
+        rewrite_plan: QueryRewritePlan | None = None,
+    ) -> Dict[str, Any]:
         top_k = top_k or settings.rag_top_k
         enhanced_query = self._conversation_enhance(query, chat_history or [])
-        rewrites = self._rewrite_queries(enhanced_query)
+        rewrites = list(rewritten_queries or self._rewrite_queries(enhanced_query))[:8]
         routes = self._route_sources(enhanced_query)
 
         ranked_lists: List[List[IndexedChunk]] = []
@@ -161,6 +168,9 @@ class HybridRetriever:
             "trace": {
                 "conversation_enhance": enhanced_query,
                 "rewrites": rewrites,
+                "rewrite_source": "shared_plan" if rewrite_plan is not None else "local_rag",
+                "shared_core_topic": rewrite_plan.core_topic if rewrite_plan is not None else "",
+                "shared_english_query": rewrite_plan.english_query if rewrite_plan is not None else "",
                 "routes": routes,
                 "before_fusion": sum(len(items) for items in ranked_lists),
                 "after_rerank": len(reranked),

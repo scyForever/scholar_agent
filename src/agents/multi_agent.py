@@ -34,7 +34,8 @@ class SearchAgent:
         topic = str(slots.get("topic") or slots.get("paper_title") or query)
         time_range = str(slots.get("time_range") or "")
         max_results = int(slots.get("max_papers") or 12)
-        rewritten_queries = self.rewriter.rewrite(topic, intent=intent, target="external")
+        rewrite_plan = self.rewriter.plan(topic, intent=intent)
+        rewritten_queries = rewrite_plan.external_queries
         allowed_tools = [
             tool for tool in self.whitelist.allowed_tools("search_agent") if tool != "search_web"
         ]
@@ -59,7 +60,13 @@ class SearchAgent:
                     if key not in aggregated or paper.score > aggregated[key].score:
                         aggregated[key] = paper
 
-        local_context = self.retriever.retrieve(topic, history, top_k=5)
+        local_context = self.retriever.retrieve(
+            topic,
+            history,
+            top_k=5,
+            rewritten_queries=rewrite_plan.local_queries,
+            rewrite_plan=rewrite_plan,
+        )
         papers = sorted(
             aggregated.values(),
             key=lambda item: (item.score, item.citations, item.year or 0),
