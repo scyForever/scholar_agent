@@ -104,16 +104,34 @@ SUPPORTED_INTENTS = [
 
 ### 2.3 执行模式
 
-| 模式 | 流程 | 预计时间 |
+| 模式 | 含义 | 预计时间 |
 |------|------|----------|
-| ⚡ 快速模式 | search → write | 15-30秒 |
-| 📝 标准模式 | search → analyze → debate → write | 30-60秒 |
-| 📚 完整模式 | 标准流程 + MoA + MPSC质量增强 | 60-120秒 |
+| ⚡ 快速模式 | 走 `intent_flows_fast`，保留该意图的最小完整链路 | 15-30秒 |
+| 📝 标准模式 | 走 `intent_flows_full`，不启用质量增强 | 30-60秒 |
+| 📚 完整模式 | 走 `intent_flows_full`，并在答案生成后叠加 `MoA + MPSC` 质量增强 | 60-120秒 |
 
 说明：
 
 - `quality_mode=True` 只有在 `fast_mode=False` 时才会真正进入 `FULL` 执行模式。
 - trace 中 `planning.task_config` 记录的是任务规划器给出的建议配置；实际运行模式由 `AgentV2.set_mode()` 决定，并写入 trace metadata 的 `mode`。
+
+#### 2.3.1 各 Intent 的实际执行流程
+
+| Intent | 快速模式 | 标准模式 | 完整模式 |
+|--------|----------|----------|----------|
+| `search_papers` | `search -> write` | `search -> write` | `search -> write -> quality` |
+| `explain_concept` | `write` | `search -> write` | `search -> write -> quality` |
+| `analyze_paper` | `search -> analyze -> write` | `search -> analyze -> write` | `search -> analyze -> write -> quality` |
+| `daily_update` | `search -> analyze -> write` | `search -> analyze -> write` | `search -> analyze -> write -> quality` |
+| `compare_methods` | `search -> analyze -> write` | `search -> analyze -> debate -> write` | `search -> analyze -> debate -> write -> quality` |
+| `generate_survey` | `search -> analyze -> write` | `search -> analyze -> debate -> write` | `search -> analyze -> debate -> write -> quality` |
+| `generate_code` | `search -> analyze -> coder` | `search -> analyze -> coder` | `search -> analyze -> coder -> quality` |
+
+补充说明：
+
+- `analyze_paper` 与 `generate_survey` 现在已经拆开：前者走“单篇论文解读”，后者走“领域综述写作”。
+- `analyze_paper` 如果本地 RAG 已命中上传论文片段，会优先采用 `local_rag_only` 的搜索模式，不再先按综述思路去外部扩搜大量论文。
+- `quality` 阶段发生在 `AgentV2` 主流程中，而不是 `MultiAgentCoordinator` 内部，所以完整模式是在基础 flow 之后额外叠加。
 
 ---
 
@@ -557,16 +575,42 @@ class MultiAgentCoordinator:
         "compare_methods": ["search", "analyze", "debate", "write"],
         "generate_code": ["search", "analyze", "coder"],
         "search_papers": ["search", "write"],
+        "daily_update": ["search", "analyze", "write"],
+        "analyze_paper": ["search", "analyze", "write"],
+        "explain_concept": ["search", "write"],
     }
 
     # 快速流程
     intent_flows_fast = {
-        "generate_survey": ["search", "write"],
-        "compare_methods": ["search", "write"],
-        "generate_code": ["coder"],
+        "generate_survey": ["search", "analyze", "write"],
+        "compare_methods": ["search", "analyze", "write"],
+        "generate_code": ["search", "analyze", "coder"],
         "search_papers": ["search", "write"],
+        "daily_update": ["search", "analyze", "write"],
+        "analyze_paper": ["search", "analyze", "write"],
+        "explain_concept": ["write"],
     }
 ```
+
+当前设计不是“所有意图共用一条搜索-综述链路”，而是按意图拆成不同任务形态：
+
+- `search_papers`：只负责搜和列结果，不做深度写作
+- `explain_concept`：以解释为目标，快速模式下可直接写，标准模式会先补充检索材料
+- `analyze_paper`：面向单篇论文解读，包含 `analyze`，但不走 `debate`
+- `daily_update`：面向近期动态归纳，包含 `analyze`，不走 `debate`
+- `compare_methods`：标准/完整模式包含 `debate`，因为需要显式比较和权衡
+- `generate_survey`：标准/完整模式包含 `debate`，因为要综合多篇工作并组织成综述
+- `generate_code`：最终阶段不是 `write`，而是 `coder`
+
+`WriteAgent` 也不再统一使用综述模板，而是按意图切换：
+
+- `generate_survey -> survey_writer`
+- `compare_methods -> compare_writer`
+- `analyze_paper -> paper_answer_writer`
+- `daily_update -> daily_update_writer`
+- `explain_concept -> concept_writer`
+
+这部分的直接目的是避免“意图识别正确，但写作阶段仍然按综述生成”的结构性错误。
 
 #### 5.2.3 LLM驱动查询重写与多源检索
 
@@ -632,6 +676,22 @@ reranked = self.reranker.rerank(query, fused)
 validated, supplement = self._crag_validate(query, reranked[:top_k])
 ```
 
+对 `analyze_paper` 这个意图，还额外有一条分流规则：
+
+```python
+if intent == "analyze_paper" and local_context.get("results"):
+    return SearchResult(
+        papers=[],
+        trace={"local_rag": local_context, "search_mode": "local_rag_only"},
+    )
+```
+
+含义是：
+
+- 如果用户上传了 PDF，且本地 RAG 已经召回到这篇论文的片段
+- 那么 `SearchAgent` 会优先把这轮任务当作“单篇文档解析”
+- 而不是继续按综述任务去外部扩搜大量论文
+
 ### 5.3 任务分层 (`src/planning/task_hierarchy.py`)
 
 #### 5.3.1 5级任务复杂度
@@ -678,6 +738,74 @@ L5_EXPERT_CONFIG = TaskConfig(
     timeout_seconds=300,
 )
 ```
+
+#### 5.3.4 意图复杂度与 LLM 能力匹配标准
+
+当前任务分层不是只看 query 长度，而是“按意图给基线分，再按槽位和上下文修正”：
+
+```python
+INTENT_BASE_SCORES = {
+    "search_papers": 1,
+    "explain_concept": 1,
+    "analyze_paper": 2,
+    "daily_update": 2,
+    "compare_methods": 3,
+    "generate_code": 4,
+    "generate_survey": 4,
+}
+```
+
+基线分的语义是：
+
+- `1`：单目标、信息组织要求低
+- `2`：单目标，但需要抽取论文方法、贡献、时间线等结构化信息
+- `3`：需要显式比较或权衡
+- `4`：需要多论文综合、代码落地或长篇组织能力
+
+在意图基线分之上，还会做这些修正：
+
+```python
+if slots.get("comparison_target"):
+    score += 1
+if slots.get("time_range"):
+    score += 1
+if int(slots.get("max_papers") or 0) >= 20:
+    score += 1
+if len(query.strip()) >= 60:
+    score += 1
+if any(marker in query for marker in ("并且", "同时", "以及", "还要", "并说明", "并比较", "并分析")):
+    score += 1
+score = min(score, 5)
+```
+
+再把总分映射到任务等级和 `LLM` 能力层级：
+
+| 总分 | TaskLevel | LLM Tier | 推理配置 |
+|------|-----------|----------|----------|
+| `<=1` | `simple` | `lite` | `direct` |
+| `2` | `moderate` | `lite` | `cot` |
+| `3` | `complex` | `standard` | `cot + react` |
+| `4` | `advanced` | `standard` | `cot + debate + reflection` |
+| `>=5` | `expert` | `standard` | `cot + debate + reflection`，更高调用预算 |
+
+例如：
+
+- `搜索 Transformer 论文`
+  `search_papers` 基线分是 `1`，通常落在 `simple / lite`
+
+- `这篇文章讲了什么，提出了什么新方法？`
+  `analyze_paper` 基线分是 `2`，通常落在 `moderate / lite`
+
+- `比较近三年两种多智能体强化学习方法，并分析优缺点`
+  `compare_methods` 基线分 `3`，再叠加 `time_range + comparison_target + 多目标标记`，会升到 `advanced` 或 `expert`
+
+- `写一篇近五年多智能体强化学习综述，并给出代表论文和未来方向`
+  `generate_survey` 基线分 `4`，再叠加 `time_range + 多目标标记`，通常落到 `expert`
+
+要注意两点：
+
+- 这里的 `llm_tier` 和 `reasoning_modes` 目前是规划器给出的建议配置，主要写入 trace
+- 实际运行是 `FAST / STANDARD / FULL` 哪个模式，仍由 `AgentV2.set_mode()` 控制，而不是由 `TaskHierarchyPlanner` 直接改写执行流
 
 ### 5.4 推理引擎 (`src/reasoning/engine.py`)
 

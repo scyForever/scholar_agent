@@ -36,6 +36,25 @@ class SearchAgent:
         max_results = int(slots.get("max_papers") or 12)
         rewrite_plan = self.rewriter.plan(topic, intent=intent)
         rewritten_queries = rewrite_plan.external_queries
+        local_context = self.retriever.retrieve(
+            topic,
+            history,
+            top_k=5,
+            rewritten_queries=rewrite_plan.local_queries,
+            rewrite_plan=rewrite_plan,
+        )
+        if intent == "analyze_paper" and local_context.get("results"):
+            result = SearchResult(
+                query=topic,
+                papers=[],
+                total_found=0,
+                source_breakdown={"local_rag": len(local_context["results"])},
+                rewritten_queries=rewritten_queries,
+                trace={"local_rag": local_context, "search_mode": "local_rag_only"},
+            )
+            self.tracer.trace_step(trace_id, "search", {"query": topic}, asdict(result))
+            return result
+
         allowed_tools = [
             tool for tool in self.whitelist.allowed_tools("search_agent") if tool != "search_web"
         ]
@@ -60,13 +79,6 @@ class SearchAgent:
                     if key not in aggregated or paper.score > aggregated[key].score:
                         aggregated[key] = paper
 
-        local_context = self.retriever.retrieve(
-            topic,
-            history,
-            top_k=5,
-            rewritten_queries=rewrite_plan.local_queries,
-            rewrite_plan=rewrite_plan,
-        )
         papers = sorted(
             aggregated.values(),
             key=lambda item: (item.score, item.citations, item.year or 0),
@@ -81,7 +93,7 @@ class SearchAgent:
             total_found=len(aggregated),
             source_breakdown=dict(source_breakdown),
             rewritten_queries=rewritten_queries,
-            trace={"local_rag": local_context},
+            trace={"local_rag": local_context, "search_mode": "hybrid"},
         )
         self.tracer.trace_step(trace_id, "search", {"query": topic}, asdict(result))
         return result
@@ -177,18 +189,25 @@ class WriteAgent:
             answer = "\n".join(lines)
         else:
             materials = self._compose_materials(search_result, analyses, debate)
-            prompt = self.templates.render(
-                "survey_writer",
-                topic=query,
-                materials=materials,
-            )
+            template_name, purpose = self._writer_profile(intent)
+            prompt = self.templates.render(template_name, topic=query, materials=materials)
             answer = self.llm.call(
                 prompt,
                 max_tokens=settings.llm_long_output_max_tokens,
-                purpose="综述写作",
+                purpose=purpose,
             )
         self.tracer.trace_step(trace_id, "write", {"intent": intent}, {"answer_preview": answer[:500]})
         return answer
+
+    def _writer_profile(self, intent: str) -> tuple[str, str]:
+        profiles = {
+            "generate_survey": ("survey_writer", "综述写作"),
+            "compare_methods": ("compare_writer", "方法对比写作"),
+            "analyze_paper": ("paper_answer_writer", "单篇论文解读"),
+            "daily_update": ("daily_update_writer", "研究动态写作"),
+            "explain_concept": ("concept_writer", "概念解释写作"),
+        }
+        return profiles.get(intent, ("survey_writer", "结构化写作"))
 
     def _compose_materials(
         self,
@@ -198,6 +217,21 @@ class WriteAgent:
     ) -> str:
         parts: List[str] = []
         if search_result is not None:
+            local_rag = search_result.trace.get("local_rag", {})
+            local_results = local_rag.get("results") or []
+            if local_results:
+                parts.append("本地论文片段：")
+                for chunk in local_results[:5]:
+                    content = self._chunk_content(chunk)
+                    source_type = self._chunk_source_type(chunk)
+                    parts.append(f"- [{source_type}] {content[:600]}")
+            supplement = local_rag.get("supplement") or []
+            if supplement:
+                parts.append("\n补充网页片段：")
+                for item in supplement[:3]:
+                    title = str(item.get("title") or "")
+                    snippet = str(item.get("snippet") or "")
+                    parts.append(f"- {title}: {snippet[:300]}")
             parts.append("论文列表：")
             parts.extend(
                 f"- {paper.title} ({paper.year or 'N/A'}, {paper.source})"
@@ -210,6 +244,20 @@ class WriteAgent:
             parts.append("\n辩论综合：")
             parts.append(debate.synthesis)
         return "\n".join(parts)
+
+    def _chunk_content(self, chunk: Any) -> str:
+        if hasattr(chunk, "content"):
+            return str(chunk.content or "")
+        if isinstance(chunk, dict):
+            return str(chunk.get("content") or "")
+        return str(chunk or "")
+
+    def _chunk_source_type(self, chunk: Any) -> str:
+        if hasattr(chunk, "source_type"):
+            return str(chunk.source_type or "chunk")
+        if isinstance(chunk, dict):
+            return str(chunk.get("source_type") or "chunk")
+        return "chunk"
 
 
 class CoderAgent:
@@ -241,12 +289,12 @@ class MultiAgentCoordinator:
     }
 
     intent_flows_fast = {
-        "generate_survey": ["search", "write"],
-        "compare_methods": ["search", "write"],
-        "generate_code": ["coder"],
+        "generate_survey": ["search", "analyze", "write"],
+        "compare_methods": ["search", "analyze", "write"],
+        "generate_code": ["search", "analyze", "coder"],
         "search_papers": ["search", "write"],
-        "daily_update": ["search", "write"],
-        "analyze_paper": ["search", "write"],
+        "daily_update": ["search", "analyze", "write"],
+        "analyze_paper": ["search", "analyze", "write"],
         "explain_concept": ["write"],
     }
 

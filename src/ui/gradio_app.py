@@ -6,6 +6,7 @@ import threading
 import time
 import traceback
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Iterator, List
 
 import gradio as gr
@@ -56,7 +57,12 @@ def _summarize_step(step: Dict[str, Any]) -> str:
     if step_type == "planning":
         return f"任务等级：{output.get('task_level', '')}"
     if step_type == "search":
-        return f"检索到 {len(output.get('papers') or [])} 篇候选论文，来源 {output.get('source_breakdown', {})}"
+        paper_count = len(output.get("papers") or [])
+        source_breakdown = output.get("source_breakdown") or {}
+        local_hits = int(source_breakdown.get("local_rag") or 0)
+        if local_hits:
+            return f"检索到 {paper_count} 篇候选论文，本地 RAG 命中 {local_hits} 个片段"
+        return f"检索到 {paper_count} 篇候选论文，来源 {source_breakdown}"
     if step_type == "llm":
         purpose = str(input_data.get("purpose") or "模型调用")
         provider = output.get("provider", "")
@@ -150,6 +156,48 @@ def _display_steps(trace: Dict[str, Any]) -> List[Dict[str, Any]]:
     return display_steps
 
 
+def _search_chunk_details(step: Dict[str, Any]) -> str:
+    output = step.get("output") or {}
+    trace_payload = output.get("trace") or {}
+    local_rag = trace_payload.get("local_rag") or {}
+    results = local_rag.get("results") or []
+    if not results:
+        return ""
+
+    cards: List[str] = []
+    for index, item in enumerate(results[:5], start=1):
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata") or {}
+        title = str(metadata.get("title") or "未命名文档")
+        pdf_path = str(metadata.get("pdf_path") or "")
+        pdf_name = Path(pdf_path).name if pdf_path else "N/A"
+        source_type = str(item.get("source_type") or "chunk")
+        content = " ".join(str(item.get("content") or "").split())
+        if len(content) > 280:
+            content = content[:280] + "..."
+
+        cards.append(
+            (
+                "<div style='margin-top:10px;border:1px solid #dbeafe;background:#f8fbff;"
+                "border-radius:8px;padding:10px 12px;'>"
+                f"<div style='font-weight:700;color:#0f172a;'>Chunk {index} · {html.escape(source_type)}</div>"
+                f"<div style='margin-top:6px;font-size:13px;color:#1f2937;'><strong>标题：</strong>{html.escape(title)}</div>"
+                f"<div style='margin-top:4px;font-size:13px;color:#1f2937;'><strong>PDF：</strong>{html.escape(pdf_name)}</div>"
+                f"<div style='margin-top:4px;font-size:12px;color:#6b7280;word-break:break-all;'>{html.escape(pdf_path)}</div>"
+                f"<div style='margin-top:8px;font-size:13px;color:#374151;line-height:1.6;'>{html.escape(content)}</div>"
+                "</div>"
+            )
+        )
+
+    return (
+        "<div style='margin-top:10px;'>"
+        "<div style='font-weight:700;color:#0f172a;'>本地 RAG 命中片段</div>"
+        + "".join(cards)
+        + "</div>"
+    )
+
+
 def _format_timeline(trace: Dict[str, Any]) -> str:
     steps = _display_steps(trace)
     if not steps:
@@ -167,6 +215,7 @@ def _format_timeline(trace: Dict[str, Any]) -> str:
         rel = _seconds_from_start(started_at, str(step.get("timestamp") or ""))
         summary = html.escape(_summarize_step(step))
         title = html.escape(_step_title(step))
+        extra = _search_chunk_details(step) if step_type == "search" else ""
         cards.append(
             (
                 "<div style='border:1px solid #e5e7eb;border-left:6px solid "
@@ -176,6 +225,7 @@ def _format_timeline(trace: Dict[str, Any]) -> str:
                 f"<div style='font-size:12px;color:#6b7280;'>{html.escape(rel)}</div>"
                 "</div>"
                 f"<div style='margin-top:8px;color:#374151;line-height:1.5;'>{summary}</div>"
+                f"{extra}"
                 "</div>"
             )
         )

@@ -38,15 +38,34 @@ TASK_CONFIGS: Dict[TaskLevel, TaskConfig] = {
     TaskLevel.L5_EXPERT: TaskConfig(LLMTier.STANDARD, 5, True, True, ["cot", "debate", "reflection"], 30, 300),
 }
 
+INTENT_BASE_SCORES: Dict[str, int] = {
+    "search_papers": 1,
+    "explain_concept": 1,
+    "analyze_paper": 2,
+    "daily_update": 2,
+    "compare_methods": 3,
+    "generate_code": 4,
+    "generate_survey": 4,
+}
+
+MULTI_OBJECTIVE_MARKERS = ("并且", "同时", "以及", "还要", "并说明", "并比较", "并分析")
+
 
 class TaskHierarchyPlanner:
     def classify(self, query: str, intent: str, slots: Dict[str, object]) -> tuple[TaskLevel, TaskConfig]:
-        score = 0
-        score += min(len(query) // 40, 2)
-        score += 2 if intent in {"generate_survey", "generate_code", "compare_methods"} else 0
-        score += 1 if intent in {"analyze_paper", "daily_update"} else 0
-        score += 1 if slots.get("comparison_target") else 0
-        score += 1 if slots.get("time_range") else 0
+        score = INTENT_BASE_SCORES.get(intent, 2)
+        normalized_query = query.strip()
+        if slots.get("comparison_target"):
+            score += 1
+        if slots.get("time_range"):
+            score += 1
+        if isinstance(slots.get("max_papers"), int) and int(slots["max_papers"]) >= 20:
+            score += 1
+        if len(normalized_query) >= 60:
+            score += 1
+        if any(marker in normalized_query for marker in MULTI_OBJECTIVE_MARKERS):
+            score += 1
+        score = min(score, 5)
 
         if score <= 1:
             level = TaskLevel.L1_SIMPLE
