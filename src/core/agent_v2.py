@@ -72,6 +72,8 @@ class AgentV2:
         if on_trace_start is not None:
             on_trace_start(trace_id)
         trace_tokens = self.llm.bind_trace(self.tracer, trace_id)
+        intent = ""
+        slots: Dict[str, Any] = {}
 
         try:
             recalled = self.memory.recall(query, user_id=session_id, limit=5)
@@ -183,6 +185,19 @@ class AgentV2:
                 whitebox=self.tracer.get_trace(trace_id),
                 artifacts=artifacts,
             )
+        except Exception as exc:
+            error_message = f"{type(exc).__name__}: {exc}"
+            self.tracer.trace_step(
+                trace_id,
+                "error",
+                {"query": query, "intent": intent, "slots": slots},
+                {"error": error_message},
+            )
+            self.tracer.fail_trace(
+                trace_id,
+                {"error": error_message, "intent": intent, "slots": slots},
+            )
+            raise
         finally:
             self.llm.reset_trace(trace_tokens)
 

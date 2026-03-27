@@ -468,7 +468,7 @@
                 
                 <div class="diagram-row">
                     <div class="diagram-box db-cyan">💾 SQLite<br><span class="small-text">元数据存储</span></div>
-                    <div class="diagram-box db-orange">📊 FAISS<br><span class="small-text">向量索引 (HNSW)</span></div>
+                    <div class="diagram-box db-orange">📊 ChromaDB<br><span class="small-text">向量索引 (HNSW)</span></div>
                     <div class="diagram-box db-pink">🔍 BM25<br><span class="small-text">全文索引</span></div>
                     <div class="diagram-box db-green">🕸️ LightRAG<br><span class="small-text">知识图谱</span></div>
                 </div>
@@ -527,7 +527,7 @@
                     </div>
                     <div class="sub-item">
                         <div class="sub-item-icon icon-db">📊</div>
-                        <div><strong>FAISS HNSW</strong> - 高速近似搜索</div>
+                        <div><strong>ChromaDB HNSW</strong> - 高速近似搜索</div>
                     </div>
                     <div class="sub-item">
                         <div class="sub-item-icon icon-db">🔍</div>
@@ -772,10 +772,10 @@
                         表格转Markdown → <span class="highlight-orange">3个表格向量</span>
                         <div class="code-block">
 索引统计: {
-    "text_chunks": 42,      # → FAISS text索引
-    "image_items": 8,       # → FAISS image索引
-    "table_items": 3,       # → FAISS table索引
-    "qa_pairs": 15,         # → FAISS qa索引
+    "text_chunks": 42,      # → ChromaDB text索引
+    "image_items": 8,       # → ChromaDB image索引
+    "table_items": 3,       # → ChromaDB table索引
+    "qa_pairs": 15,         # → ChromaDB qa索引
     "kg_triples": 28        # → LightRAG知识图谱
 }
                         </div>
@@ -1012,7 +1012,7 @@ CRAG验证: {
                     </div>
                     <div class="sub-item">
                         <div class="sub-item-icon icon-db">📊</div>
-                        <div><strong>向量数据库</strong><br>FAISS (HNSW索引)</div>
+                        <div><strong>向量数据库</strong><br>ChromaDB (HNSW索引)</div>
                     </div>
                     <div class="sub-item">
                         <div class="sub-item-icon icon-db">💾</div>

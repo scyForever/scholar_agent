@@ -78,6 +78,13 @@ class WhiteboxTracer:
         trace["final_output"] = _jsonable(final_output)
         self._persist(trace_id)
 
+    def fail_trace(self, trace_id: str, final_output: Any) -> None:
+        trace = self._traces[trace_id]
+        trace["status"] = "failed"
+        trace["finished_at"] = datetime.utcnow().isoformat()
+        trace["final_output"] = _jsonable(final_output)
+        self._persist(trace_id)
+
     def get_trace(self, trace_id: str) -> Dict[str, Any]:
         if trace_id not in self._traces:
             path = self.storage_dir / f"{trace_id}.json"

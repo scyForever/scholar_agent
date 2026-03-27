@@ -21,6 +21,7 @@ class AppSettings:
     cache_dir: Path = BASE_DIR / "cache"
     log_dir: Path = BASE_DIR / "logs"
     report_dir: Path = BASE_DIR / "reports"
+    vector_db_dir: Path = BASE_DIR / "data" / "vector_db"
     whitelist_path: Path = BASE_DIR / "data" / "whitelist.json"
     trace_dir: Path = BASE_DIR / "logs" / "traces"
     memory_db_path: Path = BASE_DIR / "data" / "memory" / "memory.db"
@@ -37,6 +38,26 @@ class AppSettings:
     rag_rrf_k: int = 60
     rag_cc_alpha: float = 0.6
     rag_top_k: int = 10
+    rag_parallel_workers: int = int(os.getenv("RAG_PARALLEL_WORKERS", "8"))
+    vector_collection_name: str = os.getenv("RAG_VECTOR_COLLECTION", "rag_chunks")
+    bge_m3_model_path: str = os.getenv(
+        "BGE_M3_MODEL_PATH", "/media/a1/16T/lcy/models/bge-m3"
+    )
+    bge_m3_batch_size: int = int(os.getenv("BGE_M3_BATCH_SIZE", "8"))
+    bge_m3_max_length: int = int(os.getenv("BGE_M3_MAX_LENGTH", "1024"))
+    bge_m3_use_fp16: bool = os.getenv("BGE_M3_USE_FP16", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    bge_reranker_model_path: str = os.getenv(
+        "BGE_RERANKER_MODEL_PATH", "/media/a1/16T/lcy/models/bge-reranker-v2-m3"
+    )
+    bge_reranker_batch_size: int = int(os.getenv("BGE_RERANKER_BATCH_SIZE", "16"))
+    bge_reranker_use_fp16: bool = os.getenv(
+        "BGE_RERANKER_USE_FP16", "false"
+    ).lower() in {"1", "true", "yes", "on"}
     wos_documents_url: str = os.getenv(
         "WOS_DOCUMENTS_URL", "https://api.clarivate.com/apis/wos-starter/v1/documents"
     )
@@ -53,6 +74,7 @@ class AppSettings:
             self.cache_dir,
             self.log_dir,
             self.report_dir,
+            self.vector_db_dir,
             self.trace_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
@@ -96,7 +118,7 @@ def _provider_defaults() -> Dict[str, Dict[str, Any]]:
         },
         "deepseek": {
             "priority": 2,
-            "model": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+            "model": os.getenv("DEEPSEEK_MODEL", "deepseek-reasoner"),
             "base_url": os.getenv(
                 "DEEPSEEK_BASE_URL", "https://api.deepseek.com/chat/completions"
             ),

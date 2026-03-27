@@ -25,6 +25,7 @@ STEP_COLORS = {
     "write": "#15803d",
     "coder": "#15803d",
     "quality": "#be123c",
+    "error": "#b91c1c",
 }
 
 
@@ -83,6 +84,8 @@ def _summarize_step(step: Dict[str, Any]) -> str:
         return f"完成代码生成，预览 {min(len(preview), 500)} 字符"
     if step_type == "quality":
         return f"质量校验结果：{output.get('verification', '')}"
+    if step_type == "error":
+        return str(output.get("error") or "执行失败")
     return "步骤执行完成"
 
 
@@ -91,7 +94,16 @@ def _step_title(step: Dict[str, Any]) -> str:
     if step_type == "llm":
         purpose = str((step.get("input") or {}).get("purpose") or "模型调用")
         return f"llm: {purpose}"
+    if step_type == "error":
+        return "error"
     return step_type
+
+
+def _compact_error(error_text: str) -> str:
+    lines = [line.strip() for line in str(error_text or "").splitlines() if line.strip()]
+    if not lines:
+        return "执行失败"
+    return lines[-1]
 
 
 def _display_steps(trace: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -277,7 +289,17 @@ def create_app() -> gr.Blocks:
     ]]:
         history = history or []
         if pdf_file:
-            agent.index_pdf(pdf_file)
+            try:
+                agent.index_pdf(pdf_file)
+            except Exception:
+                error_text = traceback.format_exc()
+                assistant_content = f"PDF 建库失败：{_compact_error(error_text)}"
+                error_history = history + [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": assistant_content},
+                ]
+                yield _render_outputs(error_history, {}, assistant_content)
+                return
 
         agent.set_mode(fast_mode=fast_mode, enable_quality_enhance=quality_mode)
         history = history + [
@@ -317,10 +339,7 @@ def create_app() -> gr.Blocks:
 
         trace = agent.tracer.get_trace(shared["trace_id"]) if shared["trace_id"] else {}
         if shared["error"] is not None:
-            error_message = "执行失败，请查看步骤详情或原始 Trace。"
-            if trace:
-                trace = dict(trace)
-                trace["status"] = "failed"
+            error_message = f"执行失败：{_compact_error(shared['error'])}\n\n请查看步骤详情或原始 Trace。"
             yield _render_outputs(history, trace, error_message)
             return
 
