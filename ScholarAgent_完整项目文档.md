@@ -46,15 +46,15 @@
 | LLM集成 | 多Provider统一接入（SCNet、硅基流动、智谱AI、DeepSeek 等） |
 | 学术API | arXiv、OpenAlex、Semantic Scholar、Web of Science Starter API |
 | Web框架 | Gradio 6.x |
-| 数据库 | SQLite（长期记忆） |
-| 检索与RAG | LLM查询重写 + TF-IDF/BM25混合检索 + CRAG式验证 |
+| 数据库 | SQLite（长期记忆 + RAG chunk元数据） + ChromaDB（本地向量库） |
+| 检索与RAG | LLM查询重写 + TF-IDF/BM25词法检索 + BGE-M3向量检索 + RRF融合 + BGE-Reranker + CRAG式验证 |
 
 ### 1.4 项目规模
 
 ```
-总代码行数: ~15,000行
+总代码行数: ~5,000行（Python源码）
 核心模块: 17个
-Python文件: 48个
+Python文件: 53个
 测试覆盖: 34/35项功能测试通过
 ```
 
@@ -78,6 +78,7 @@ Python文件: 48个
 
 - `Web of Science Starter API` 已接入统一搜索链路，与 `arXiv / OpenAlex / Semantic Scholar` 一起参与聚合排序。
 - 查询重写已从“静态术语词表改写”升级为“LLM 输出结构化重写计划”，同时生成 `english_query / external_queries / local_queries`。
+- 本地 RAG 已切换为 `BGE-M3 embedding + ChromaDB 持久化向量库 + BGE-Reranker`，不再使用 `FAISS`。
 - Gradio 右侧新增实时执行时间线，不再只展示原始 JSON。
 - 每次 LLM 调用会在 trace 中记录 `purpose / provider / model / latency / error`，前端可直接看到实际命中的模型。
 - OpenAI 兼容 provider 的 `base_url` 会统一规范到完整 `chat/completions` endpoint，减少接口地址配置错误。
@@ -85,6 +86,7 @@ Python文件: 48个
 - trace 每次写盘前都会确保 `logs/traces` 目录存在，避免目录缺失导致写盘失败。
 - 前端时间线中的同一次 `llm started / completed` 会按 `call_id` 合并成一张卡片，并支持滚动查看。
 - 长文写作与质量增强使用单独的长输出 token 配置，减少综述正文中途截断。
+- 新增 `rebuild_chroma_index.py`，可从现有 `rag_index.db` 一键重建 `ChromaDB` 向量索引。
 
 ### 2.2 支持的任务类型
 
@@ -142,16 +144,16 @@ SUPPORTED_INTENTS = [
           ▼                   ▼                   ▼
 ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
 │   Multi-Agent   │ │  Reasoning层    │ │  Quality层      │
-│   协作系统      │ │                 │ │                 │
+│   协作系统       │ │                 │ │                 │
 │ ┌─────────────┐ │ │ ┌─────────────┐ │ │ ┌─────────────┐ │
 │ │ SearchAgent │ │ │ │   Direct    │ │ │ │  Self-MoA   │ │
-│ │AnalyzeAgent │ │ │ │   CoT       │ │ │ │  (多模型    │ │
+│ │AnalyzeAgent │ │ │ │   CoT       │ │ │ │  (多模型     │ │
 │ │ DebateAgent │ │ │ │   ReAct     │ │ │ │   聚合)     │ │
 │ │ WriteAgent  │ │ │ │   ToT       │ │ │ └─────────────┘ │
 │ │ CoderAgent  │ │ │ │   Debate    │ │ │ ┌─────────────┐ │
 │ └─────────────┘ │ │ │  Reflection │ │ │ │    MPSC     │ │
-└─────────────────┘ │ │   CoVe      │ │ │ │ (多路径     │ │
-                    │ └─────────────┘ │ │ │  自洽验证)  │ │
+└─────────────────┘ │ │   CoVe      │ │ │ │ (多路径      │ │
+                    │ └─────────────┘ │ │ │  自洽验证)   │ │
                     └─────────────────┘ │ └─────────────┘ │
                                         └─────────────────┘
                               │
@@ -236,6 +238,7 @@ scholar-agent/
 ├── 📄 api_keys.py               # API密钥配置（10种LLM提供商）
 ├── 📄 requirements.txt          # Python依赖
 ├── 📄 verify_features.py        # 功能验证测试脚本
+├── 📄 rebuild_chroma_index.py   # 从 SQLite chunk 重建 ChromaDB 索引
 ├── 📄 README.md                 # 项目说明
 │
 ├── 📁 config/                   # 配置文件
@@ -300,11 +303,14 @@ scholar-agent/
 │   │
 │   ├── 📁 memory/               # 长期记忆（710行）
 │   │   ├── __init__.py
-│   │   └── manager.py           # SQLite存储 + 向量检索
+│   │   └── manager.py           # SQLite存储 + TF-IDF/BM25/重要性混合召回
 │   │
 │   ├── 📁 rag/                  # RAG检索（~400行）
 │   │   ├── __init__.py
-│   │   └── retriever.py         # TF-IDF + BM25混合检索
+│   │   ├── bge_m3_embedder.py   # BGE-M3 向量编码
+│   │   ├── bge_reranker.py      # BGE-Reranker 重排序
+│   │   ├── vector_store.py      # ChromaDB 持久化向量库
+│   │   └── retriever.py         # 词法+向量并行检索 + RRF + CRAG
 │   │
 │   ├── 📁 whitebox/             # 白盒追踪（~450行）
 │   │   ├── __init__.py
@@ -588,6 +594,44 @@ rewritten_queries = self.rewriter.rewrite(
 
 这样中文术语、缩写和中英混合主题会优先被改写成更适合英文数据库的标准学术检索式。
 
+#### 5.2.4 本地 RAG 检索链路
+
+当前本地 RAG 采用“共享改写计划 + 词法/向量并行检索 + 融合重排”的流程：
+
+```python
+rewrite_plan = self.rewriter.plan(topic, intent=intent)
+
+local_result = self.retriever.retrieve(
+    topic,
+    chat_history=history,
+    rewritten_queries=rewrite_plan.local_queries,
+    rewrite_plan=rewrite_plan,
+)
+```
+
+`HybridRetriever.retrieve()` 的核心步骤是：
+
+1. 对 query 做 `conversation_enhance`
+2. 复用 `QueryRewritePlan.local_queries`
+3. 根据问题类型路由 `text_chunk / table_chunk / qa_chunk / kg_chunk`
+4. 对每个 `(rewritten_query, source_type)` 并行执行两路召回
+5. 词法路：`TF-IDF + BM25`
+6. 向量路：`BGE-M3 embedding -> ChromaDB query`
+7. 多路结果用 `RRF` 融合
+8. 用 `BGE-Reranker` 对融合结果重排
+9. 用 LLM 做 `CRAG` 式相关性判断
+10. 若验证通过的 chunk 少于 3 条，再补充网页搜索片段
+
+简化后的实现轮廓如下：
+
+```python
+tasks = [(rewritten_query, source_type) for rewritten_query in rewrites for source_type in routes]
+ranked_lists = parallel_lexical_and_vector_search(tasks)
+fused = self._rrf_fusion(ranked_lists)
+reranked = self.reranker.rerank(query, fused)
+validated, supplement = self._crag_validate(query, reranked[:top_k])
+```
+
 ### 5.3 任务分层 (`src/planning/task_hierarchy.py`)
 
 #### 5.3.1 5级任务复杂度
@@ -678,16 +722,21 @@ class ReasoningEngine:
 def self_moa(self, query: str, context: str) -> MoAResult:
     """
     多模型答案聚合：
-    1. 调用多个LLM生成候选答案
-    2. 让另一个LLM评估和聚合
-    3. 输出最优答案
+    1. 优先选取非 scnet 的真实 Provider 生成候选答案
+    2. 若只有单个候选成功，则直接保留该候选
+    3. 若多个候选成功，则再调用一次聚合
+    4. 若候选或聚合失败，则保留增强前答案，不中断主流程
     """
     candidates = []
-    for provider in ["siliconflow", "zhipu", "dashscope"]:
-        answer = self.llm.call(query, provider=provider)
-        candidates.append(answer)
-    
-    return self._aggregate_answers(candidates)
+    errors = []
+    for provider in explicit_providers:
+        try:
+            candidates.append(self.llm.call(candidate_prompt, provider=provider))
+        except Exception as exc:
+            errors.append(str(exc))
+
+    if not candidates:
+        return MoAResult(answer=context, candidates=[], errors=errors)
 ```
 
 #### 5.5.2 MPSC (Multi-Path Self-Consistency)
@@ -700,10 +749,22 @@ def mpsc_verify(self, query: str, answer: str) -> VerificationResult:
     2. 检查结论一致性
     3. 计算置信度分数
     """
-    paths = [self._generate_path(query) for _ in range(3)]
-    consistency = self._check_consistency(paths)
+    paths = [call_verify_path(prompt) for prompt in prompts if call_succeeds]
+    if len(paths) < 2:
+        return VerificationResult(
+            answer=answer,
+            consistency_score=0.0,
+            verdict="skipped_due_to_llm_error",
+        )
+    consistency = tfidf_cosine_consistency(paths)
     return VerificationResult(answer, consistency, paths)
 ```
+
+当前完整模式还有一个重要行为约束：
+
+- `quality` 阶段失败不会再导致整轮请求中断
+- 如果某个候选、某条校验路径或聚合调用失败，系统会保留 `write` 阶段已经生成的答案
+- trace 中会记录 `quality` 阶段的错误，但前端仍会返回可用答案
 
 ### 5.6 长期记忆 (`src/memory/manager.py`)
 
@@ -722,9 +783,9 @@ class MemoryType(Enum):
 ```sql
 CREATE TABLE memories (
     id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
     type TEXT,
     content TEXT,
-    embedding BLOB,
     metadata TEXT,
     importance REAL,
     access_count INTEGER,
@@ -740,14 +801,14 @@ def recall(self, query: str, memory_type: MemoryType = None,
            limit: int = 5) -> List[Memory]:
     """
     混合检索策略：
-    1. 向量相似度检索
-    2. 关键词BM25检索
+    1. TF-IDF 语义相似度
+    2. BM25 关键词得分
     3. 重要性加权
     4. 时间衰减
     """
-    vector_results = self._vector_search(query, limit * 2)
-    keyword_results = self._keyword_search(query, limit * 2)
-    return self._merge_and_rank(vector_results, keyword_results, limit)
+    similarities = cosine_similarity(matrix[:-1], matrix[-1]).ravel()
+    bm25 = _bm25_scores(query, contents)
+    score = 0.45 * similarities + 0.25 * bm25 + 0.2 * importance + 0.1 * recency_bonus
 ```
 
 #### 5.6.4 线程与落盘行为
@@ -1020,20 +1081,23 @@ class DialogueState:
 **原因**：
 1. 用户原始输入不是学术检索式
 2. 中文/缩写/中英混合主题没有被结构化展开
-3. 外部源返回后缺少统一相关性过滤
+3. 本地 RAG 需要同时兼顾词法召回与向量召回
+4. 外部源返回后缺少统一相关性过滤
 
 **解决**：
 ```python
 # 1. 先做 LLM 查询重写
-queries = self.rewriter.rewrite(query, intent=intent, target="external")
+plan = self.rewriter.plan(query, intent=intent)
 
-# 2. 用多个变体搜索外部学术源
-for rewritten in queries[:3]:
+# 2. 用多个 external_queries 搜索外部学术源
+for rewritten in plan.external_queries[:3]:
     papers = TOOL_REGISTRY.call(tool_name, query=rewritten, ...)
 
-# 3. 对标题/摘要做相关性检查
-if query_terms and not any(term in text for term in query_terms):
-    return None
+# 3. 本地 RAG 用 local_queries 并行跑词法/向量检索
+ranked_lists = parallel_lexical_and_vector_search(plan.local_queries)
+
+# 4. 对外部返回和本地 chunk 再做统一相关性过滤
+validated = self._crag_validate(query, candidates)
 ```
 
 #### 问题6：Gradio 中 SQLite 跨线程报错
@@ -1197,7 +1261,7 @@ llm_long_output_max_tokens: int = 32000
 > 
 > **核心Agent层**：
 > 5个专业Agent协作：
-> - SearchAgent：并行调用3个学术API
+> - SearchAgent：并行调用4个学术源 + 本地 RAG
 > - AnalyzeAgent：提取论文核心贡献
 > - DebateAgent：多视角辩论
 > - WriteAgent：综述撰写（支持outline→draft两阶段）
@@ -1397,6 +1461,22 @@ source /home/a1/miniconda3/etc/profile.d/conda.sh
 conda activate agent
 ```
 
+### 9.1.1 本地 RAG 模型与向量库准备
+
+如果需要启用本地 PDF 建库与本地 RAG，请额外准备本地模型权重并确认 `chromadb` 可用：
+
+```bash
+export BGE_M3_MODEL_PATH=/your/path/to/bge-m3
+export BGE_RERANKER_MODEL_PATH=/your/path/to/bge-reranker-v2-m3
+```
+
+本地 RAG 相关组件当前是：
+
+- `BGEM3Embedder`：负责 chunk 与 query 的 dense embedding
+- `LocalChromaVectorStore`：负责向量持久化与查询
+- `BGEReranker`：负责对 `RRF` 融合结果做最终重排
+
+
 ### 9.2 配置API密钥
 
 编辑 `api_keys.py`：
@@ -1573,6 +1653,9 @@ requests>=2.28.0
 beautifulsoup4>=4.11.0
 pdfplumber>=0.7.0
 arxiv>=2.0.0
+chromadb>=0.5.5
+FlagEmbedding>=1.3.3
+transformers>=4.44.2,<5
 numpy>=1.24.0
 scikit-learn>=1.2.0
 ```
@@ -1600,7 +1683,8 @@ scikit-learn>=1.2.0
 | v1.2 | 2026-01-10 | Bug修复 + Gradio 6.x兼容 |
 | v2.0 | 2026-01-11 | 性能优化 + 搜索质量提升 |
 | v2.1 | 2026-03-26 | Web of Science 接入 + LLM查询改写 + 实时执行时间线 + 模型调用可视化 |
+| v2.2 | 2026-03-27 | 本地 RAG 切换到 BGE-M3 + ChromaDB + BGE-Reranker，新增 ChromaDB 重建脚本 |
 
 ---
 
-*文档版本: 2.1 | 最后更新: 2026-03-26*
+*文档版本: 2.2 | 最后更新: 2026-03-27*
