@@ -209,4 +209,5 @@ __marimo__/
 logs/
 reports/
 cache/
-data/
+data/memory/
+data/vector_db/
