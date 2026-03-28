@@ -81,6 +81,7 @@ Python文件: 53个
 - 本地 RAG 已切换为 `BGE-M3 embedding + ChromaDB 持久化向量库 + BGE-Reranker`，不再使用 `FAISS`。
 - Gradio 右侧新增实时执行时间线，不再只展示原始 JSON。
 - 每次 LLM 调用会在 trace 中记录 `purpose / provider / model / latency / error`，前端可直接看到实际命中的模型。
+- 规划器输出的 `reasoning_modes / enable_multi_agent / max_llm_calls` 已接入运行时执行，不再只是 trace 字段。
 - OpenAI 兼容 provider 的 `base_url` 会统一规范到完整 `chat/completions` endpoint，减少接口地址配置错误。
 - `MemoryManager` 与 `HybridRetriever` 已改为按次创建 SQLite 连接，兼容 Gradio worker thread。
 - trace 每次写盘前都会确保 `logs/traces` 目录存在，避免目录缺失导致写盘失败。
@@ -113,7 +114,10 @@ SUPPORTED_INTENTS = [
 说明：
 
 - `quality_mode=True` 只有在 `fast_mode=False` 时才会真正进入 `FULL` 执行模式。
-- trace 中 `planning.task_config` 记录的是任务规划器给出的建议配置；实际运行模式由 `AgentV2.set_mode()` 决定，并写入 trace metadata 的 `mode`。
+- `AgentV2.set_mode()` 决定的是用户请求的执行模式上限；真正执行时还会再叠加规划器约束。
+- 如果规划结果里 `enable_multi_agent=False`，即使用户选择了 `STANDARD / FULL`，基础 flow 也会收缩到 `intent_flows_fast`。
+- `max_llm_calls` 现在是运行时真实预算，但统计范围限定为执行阶段的高层 LLM 调用；意图识别、查询改写、RAG 相关性判断不计入该预算。
+- trace 中 `planning.task_config` 仍保留原始规划结果，实际运行模式继续写入 trace metadata 的 `mode`。
 
 #### 2.3.1 各 Intent 的实际执行流程
 
@@ -132,6 +136,7 @@ SUPPORTED_INTENTS = [
 - `analyze_paper` 与 `generate_survey` 现在已经拆开：前者走“单篇论文解读”，后者走“领域综述写作”。
 - `analyze_paper` 如果本地 RAG 已命中上传论文片段，会优先采用 `local_rag_only` 的搜索模式，不再先按综述思路去外部扩搜大量论文。
 - `quality` 阶段发生在 `AgentV2` 主流程中，而不是 `MultiAgentCoordinator` 内部，所以完整模式是在基础 flow 之后额外叠加。
+- 上表描述的是各模式的上限 flow；若规划器给出 `enable_multi_agent=False`，系统会把 `STANDARD / FULL` 的基础 flow 自动降到对应的快速 flow。
 
 ---
 
@@ -434,6 +439,7 @@ class LLMManager:
     - 智能故障转移
     - 健康检查与自动恢复
     - Trace 绑定与模型调用可观测性
+    - 执行阶段 LLM 调用预算控制
     """
 
     def __init__(self):
@@ -521,6 +527,28 @@ tracer.trace_step(
 - 当前这次调用要做什么，例如 `查询改写`、`论文分析`、`综述写作`
 - 实际命中的 `provider / model`
 - 调用耗时和失败信息
+
+另外，`LLMManager` 现在还维护每轮请求的执行预算：
+
+- `bind_budget(max_calls)`：在规划完成后绑定本轮预算
+- `budgeted=True`：只有被标记为执行阶段高层调用的请求才会消耗预算
+- 预算耗尽时会抛出明确错误：`LLM call budget exceeded: used x/y`
+- `llm` trace 步骤会额外写入 `budget_limit / budget_used / budget_remaining`
+
+当前纳入预算的调用包括：
+
+- `AnalyzeAgent` 的论文分析
+- `WriteAgent / CoderAgent` 的生成
+- `ReasoningEngine` 的各类推理模式
+- `QualityEnhancer` 的候选生成、聚合与验证
+
+当前不纳入预算的调用包括：
+
+- 意图识别
+- 查询改写
+- RAG 相关性判断
+
+这样做的目的是让 `max_llm_calls` 真正约束主执行链，而不是在预处理阶段被提前耗尽。
 
 #### 5.1.5 Provider配置与响应解析
 
@@ -611,6 +639,12 @@ class MultiAgentCoordinator:
 - `explain_concept -> concept_writer`
 
 这部分的直接目的是避免“意图识别正确，但写作阶段仍然按综述生成”的结构性错误。
+
+当前 `MultiAgentCoordinator` 还会把规划器配置接进执行期：
+
+- `enable_multi_agent=False` 时，基础 flow 会自动降到 `intent_flows_fast`
+- `max_llm_calls` 会通过 `LLMManager` 预算约束执行阶段调用数
+- `AnalyzeAgent` 不再固定分析 5 篇论文，而是会先为后续 `debate / write / coder` 预留预算，再决定当前最多分析多少篇
 
 #### 5.2.3 LLM驱动查询重写与多源检索
 
@@ -802,10 +836,19 @@ score = min(score, 5)
 - `写一篇近五年多智能体强化学习综述，并给出代表论文和未来方向`
   `generate_survey` 基线分 `4`，再叠加 `time_range + 多目标标记`，通常落到 `expert`
 
-要注意两点：
+这些配置现在与运行时的关系如下：
 
-- 这里的 `llm_tier` 和 `reasoning_modes` 目前是规划器给出的建议配置，主要写入 trace
-- 实际运行是 `FAST / STANDARD / FULL` 哪个模式，仍由 `AgentV2.set_mode()` 控制，而不是由 `TaskHierarchyPlanner` 直接改写执行流
+- `reasoning_modes`：已经真实接入推理引擎，`ReasoningEngine` 会在规划器允许的模式集合内自动选模。
+- `enable_multi_agent`：已经真实接入执行器；若为 `False`，`MultiAgentCoordinator` 会把基础 flow 收缩到 `intent_flows_fast`。
+- `max_llm_calls`：已经真实接入 `LLMManager` 的预算控制，并进一步限制分析步最多分析多少篇论文，以便为后续 `debate / write / coder` 预留调用数。
+- `llm_tier`：目前仍主要作为规划层标签与 trace 字段，尚未直接改写 Provider/模型路由。
+- `enable_quality_enhance`：目前仍主要由 UI 与 `AgentV2.set_mode()` 控制，规划器字段暂未直接改写质量增强开关。
+- `FAST / STANDARD / FULL` 仍由 `AgentV2.set_mode()` 决定，但运行时会叠加上述规划器约束。
+
+举例：
+
+- `moderate` 级的 `analyze_paper` 预算为 `4`。系统会先为 `write` 预留 1 次调用，因此 `AnalyzeAgent` 最多只分析 3 篇论文，而不是固定分析 5 篇。
+- `advanced / expert` 级的 `generate_survey` 通常仍允许 `debate + write + quality` 保留，因此预算和可用推理模式都会明显更高。
 
 ### 5.4 推理引擎 (`src/reasoning/engine.py`)
 
@@ -829,6 +872,26 @@ class ReasoningEngine:
         elif mode == "cove":
             return self._chain_of_verification(query, context)
 ```
+
+当前推理模式选择已经不是单纯的关键词启发式，而是“两阶段决策”：
+
+1. 先根据 query 语义生成候选模式
+2. 再用规划器给出的 `reasoning_modes` 作为允许集合做约束
+
+例如：
+
+- 比较类问题优先尝试 `debate`
+- 综述类问题优先尝试 `reflection`
+- 实现/步骤类问题优先尝试 `react`
+- 但如果规划器只允许 `["cot"]`，最终就会收缩到 `cot`
+
+另外，`ReasoningEngine` 现在还会估算不同推理模式的调用开销：
+
+- `direct / cot / react / tot / debate`：1次
+- `reflection`：2次
+- `cove`：3次
+
+这个估算值会被执行器用于给 `AnalyzeAgent` 留出后续 `debate / write` 所需预算。
 
 #### 5.4.2 推理模式对比
 
@@ -893,6 +956,7 @@ def mpsc_verify(self, query: str, answer: str) -> VerificationResult:
 - `quality` 阶段失败不会再导致整轮请求中断
 - 如果某个候选、某条校验路径或聚合调用失败，系统会保留 `write` 阶段已经生成的答案
 - trace 中会记录 `quality` 阶段的错误，但前端仍会返回可用答案
+- `quality` 阶段的 LLM 调用现在也会计入 `max_llm_calls` 执行预算；若预算不足，质量增强会失败并保留基础答案，而不会打断整轮流程
 
 ### 5.6 长期记忆 (`src/memory/manager.py`)
 

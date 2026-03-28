@@ -30,6 +30,7 @@ class QualityEnhancer:
                             provider=provider,
                             max_tokens=settings.llm_long_output_max_tokens,
                             purpose=f"质量增强候选-{provider}",
+                            budgeted=True,
                         )
                     )
                 except Exception as exc:
@@ -43,6 +44,7 @@ class QualityEnhancer:
                             temperature=temperature,
                             max_tokens=settings.llm_long_output_max_tokens,
                             purpose="质量增强候选",
+                            budgeted=True,
                         )
                     )
                 except Exception as exc:
@@ -56,6 +58,7 @@ class QualityEnhancer:
                             temperature=temperature,
                             max_tokens=settings.llm_long_output_max_tokens,
                             purpose="质量增强候选",
+                            budgeted=True,
                         )
                     )
                 except Exception as exc:
@@ -88,6 +91,7 @@ class QualityEnhancer:
                 aggregate_prompt,
                 max_tokens=settings.llm_long_output_max_tokens,
                 purpose="质量增强聚合",
+                budgeted=True,
             )
         except Exception as exc:
             errors.append(f"aggregate: {type(exc).__name__}: {exc}")
@@ -120,6 +124,7 @@ class QualityEnhancer:
                     self.llm.call(
                         f"请从{label}角度验证以下回答是否成立。\n问题：{query}\n回答：{answer}",
                         purpose=purpose,
+                        budgeted=True,
                     )
                 )
             except Exception as exc:

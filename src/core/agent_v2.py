@@ -72,6 +72,7 @@ class AgentV2:
         if on_trace_start is not None:
             on_trace_start(trace_id)
         trace_tokens = self.llm.bind_trace(self.tracer, trace_id)
+        budget_tokens = None
         intent = ""
         slots: Dict[str, Any] = {}
 
@@ -114,11 +115,19 @@ class AgentV2:
             slots = slot_result["slots"]
             self.dialogue.update_state(session_id, intent="", current_slots={}, missing_slots=[], last_trace_id=trace_id)
             level, config = self.planner.classify(query, intent, slots)
+            budget_tokens = self.llm.bind_budget(config.max_llm_calls)
             self.tracer.trace_step(
                 trace_id,
                 "planning",
                 {"query": query, "intent": intent, "slots": slots},
-                {"task_level": level.value, "task_config": asdict(config)},
+                {
+                    "task_level": level.value,
+                    "task_config": asdict(config),
+                    "runtime_constraints": {
+                        "enable_multi_agent": config.enable_multi_agent,
+                        "max_llm_calls": config.max_llm_calls,
+                    },
+                },
             )
 
             artifacts = self.multi_agent.execute(
@@ -127,12 +136,19 @@ class AgentV2:
                 slots=slots,
                 mode=self.execution_mode,
                 trace_id=trace_id,
+                task_config=config,
                 history=self.dialogue.get_state(session_id).history,
             )
             answer = str(artifacts.get("answer") or "")
 
             if not answer:
-                reasoning = self.reasoning.reason(query, memory_context, mode="auto", trace_id=trace_id)
+                reasoning = self.reasoning.reason(
+                    query,
+                    memory_context,
+                    mode="auto",
+                    trace_id=trace_id,
+                    preferred_modes=config.reasoning_modes,
+                )
                 answer = reasoning.answer
                 artifacts["reasoning"] = reasoning
 
@@ -199,6 +215,8 @@ class AgentV2:
             )
             raise
         finally:
+            if budget_tokens is not None:
+                self.llm.reset_budget(budget_tokens)
             self.llm.reset_trace(trace_tokens)
 
     def submit_feedback(self, session_id: str, query: str, response: str, rating: int, comment: str = "") -> None:

@@ -220,6 +220,8 @@ class LLMManager:
         self._trace_id_var: ContextVar[str] = ContextVar("llm_trace_id", default="")
         self._tracer_var: ContextVar[Any] = ContextVar("llm_tracer", default=None)
         self._call_index_var: ContextVar[int] = ContextVar("llm_call_index", default=0)
+        self._budget_limit_var: ContextVar[int | None] = ContextVar("llm_budget_limit", default=None)
+        self._budget_used_var: ContextVar[int] = ContextVar("llm_budget_used", default=0)
         self._init_providers()
 
     def bind_trace(self, tracer: Any, trace_id: str) -> Tuple[Token[str], Token[Any], Token[int]]:
@@ -234,6 +236,34 @@ class LLMManager:
         self._trace_id_var.reset(trace_id_token)
         self._tracer_var.reset(tracer_token)
         self._call_index_var.reset(call_index_token)
+
+    def bind_budget(self, max_calls: int | None) -> Tuple[Token[int | None], Token[int]]:
+        limit = int(max_calls) if isinstance(max_calls, int) and max_calls > 0 else None
+        return (
+            self._budget_limit_var.set(limit),
+            self._budget_used_var.set(0),
+        )
+
+    def reset_budget(self, tokens: Tuple[Token[int | None], Token[int]]) -> None:
+        limit_token, used_token = tokens
+        self._budget_limit_var.reset(limit_token)
+        self._budget_used_var.reset(used_token)
+
+    def get_budget_status(self) -> Dict[str, int | None]:
+        limit = self._budget_limit_var.get()
+        used = self._budget_used_var.get()
+        remaining = None if limit is None else max(limit - used, 0)
+        return {"limit": limit, "used": used, "remaining": remaining}
+
+    def _consume_budget(self, purpose: str) -> None:
+        limit = self._budget_limit_var.get()
+        if limit is None:
+            return
+        used = self._budget_used_var.get()
+        if used >= limit:
+            label = purpose or "未命名调用"
+            raise RuntimeError(f"LLM call budget exceeded: used {used}/{limit}, blocked purpose={label}")
+        self._budget_used_var.set(used + 1)
 
     def _init_providers(self) -> None:
         for name, cfg in settings.provider_configs.items():
@@ -262,8 +292,11 @@ class LLMManager:
         max_tokens: int = 1024,
         response_format: str = "text",
         purpose: str = "",
+        budgeted: bool = False,
     ) -> str:
         if provider:
+            if budgeted:
+                self._consume_budget(purpose)
             return self._invoke_provider(
                 provider_name=provider,
                 prompt=prompt,
@@ -283,6 +316,7 @@ class LLMManager:
             max_tokens=max_tokens,
             response_format=response_format,
             purpose=purpose,
+            budgeted=budgeted,
         )
 
     def call_with_fallback(
@@ -294,7 +328,10 @@ class LLMManager:
         max_tokens: int = 1024,
         response_format: str = "text",
         purpose: str = "",
+        budgeted: bool = False,
     ) -> str:
+        if budgeted:
+            self._consume_budget(purpose)
         healthy_providers = self._get_healthy_providers()
         for attempt, provider_name in enumerate(healthy_providers, start=1):
             try:
@@ -336,6 +373,7 @@ class LLMManager:
         temperature: float = 0.1,
         max_tokens: int = 1024,
         purpose: str = "",
+        budgeted: bool = False,
     ) -> Dict[str, Any]:
         raw = self.call(
             prompt,
@@ -345,6 +383,7 @@ class LLMManager:
             max_tokens=max_tokens,
             response_format="json",
             purpose=purpose,
+            budgeted=budgeted,
         )
         try:
             return json.loads(raw)
@@ -521,6 +560,8 @@ class LLMManager:
                 "prompt_preview": prompt[:240],
                 "response_format": response_format,
                 "max_tokens": max_tokens,
+                "budget_limit": self._budget_limit_var.get(),
+                "budget_used": self._budget_used_var.get(),
             },
             {
                 "call_id": call_id,
@@ -534,6 +575,7 @@ class LLMManager:
                 "error_type": error_type,
                 "http_status": http_status,
                 "error_response_preview": error_response_preview,
+                "budget_remaining": self.get_budget_status()["remaining"],
             },
             metadata={"attempt": attempt, "fallback": fallback},
         )

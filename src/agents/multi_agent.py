@@ -8,6 +8,7 @@ from config.settings import settings
 from src.core.llm import LLMManager
 from src.core.models import DebateResult, ExecutionMode, Paper, PaperAnalysis, SearchResult
 from src.preprocessing.query_rewriter import QueryRewriter
+from src.planning.task_hierarchy import TaskConfig
 from src.prompt_templates.manager import PromptTemplateManager
 from src.rag.retriever import HybridRetriever
 from src.reasoning.engine import ReasoningEngine
@@ -110,16 +111,18 @@ class AnalyzeAgent:
         self.templates = templates
         self.tracer = tracer
 
-    def run(self, papers: List[Paper], trace_id: str) -> List[PaperAnalysis]:
+    def run(self, papers: List[Paper], trace_id: str, max_items: int | None = None) -> List[PaperAnalysis]:
         analyses: List[PaperAnalysis] = []
-        for paper in papers[:5]:
+        capped = 5 if max_items is None else max(0, min(max_items, 5))
+        selected_papers = papers[:capped]
+        for paper in selected_papers:
             prompt = self.templates.render(
                 "paper_analysis",
                 title=paper.title,
                 abstract=paper.abstract,
                 context=f"来源：{paper.source}, 年份：{paper.year}, 引用数：{paper.citations}",
             )
-            raw = self.llm.call(prompt, purpose="论文分析")
+            raw = self.llm.call(prompt, purpose="论文分析", budgeted=True)
             analyses.append(
                 PaperAnalysis(
                     paper=paper,
@@ -131,7 +134,12 @@ class AnalyzeAgent:
                     raw_analysis=raw,
                 )
             )
-        self.tracer.trace_step(trace_id, "analyze", {"papers": [paper.title for paper in papers[:5]]}, {"count": len(analyses)})
+        self.tracer.trace_step(
+            trace_id,
+            "analyze",
+            {"papers": [paper.title for paper in selected_papers]},
+            {"count": len(analyses), "analysis_limit": capped},
+        )
         return analyses
 
     def _extract_lines(self, text: str, keyword: str) -> List[str]:
@@ -148,12 +156,25 @@ class DebateAgent:
         self.reasoning = reasoning
         self.tracer = tracer
 
-    def run(self, query: str, analyses: List[PaperAnalysis], trace_id: str) -> DebateResult:
+    def run(
+        self,
+        query: str,
+        analyses: List[PaperAnalysis],
+        trace_id: str,
+        task_config: TaskConfig | None = None,
+    ) -> DebateResult:
         materials = "\n\n".join(
             f"论文：{item.paper.title}\n摘要：{item.summary}\n贡献：{'；'.join(item.contributions)}"
             for item in analyses
         )
-        result = self.reasoning.reason(query, materials, mode="debate", trace_id=trace_id)
+        preferred_modes = task_config.reasoning_modes if task_config is not None else ["debate"]
+        result = self.reasoning.reason(
+            query,
+            materials,
+            mode="auto",
+            trace_id=trace_id,
+            preferred_modes=preferred_modes,
+        )
         debate = DebateResult(
             question=query,
             thesis="围绕研究问题的多视角综合判断",
@@ -195,6 +216,7 @@ class WriteAgent:
                 prompt,
                 max_tokens=settings.llm_long_output_max_tokens,
                 purpose=purpose,
+                budgeted=True,
             )
         self.tracer.trace_step(trace_id, "write", {"intent": intent}, {"answer_preview": answer[:500]})
         return answer
@@ -272,7 +294,7 @@ class CoderAgent:
             for analysis in analyses
         )
         prompt = self.templates.render("code_generation", topic=query, materials=materials)
-        answer = self.llm.call(prompt, purpose="代码生成")
+        answer = self.llm.call(prompt, purpose="代码生成", budgeted=True)
         self.tracer.trace_step(trace_id, "coder", {"query": query}, {"answer_preview": answer[:500]})
         return answer
 
@@ -307,6 +329,7 @@ class MultiAgentCoordinator:
         templates: PromptTemplateManager,
         tracer: WhiteboxTracer,
     ) -> None:
+        self.llm = llm
         self.search_agent = SearchAgent(retriever, whitelist, tracer)
         self.analyze_agent = AnalyzeAgent(llm, templates, tracer)
         self.debate_agent = DebateAgent(reasoning, tracer)
@@ -320,9 +343,12 @@ class MultiAgentCoordinator:
         slots: Dict[str, Any],
         mode: ExecutionMode,
         trace_id: str,
+        task_config: TaskConfig | None = None,
         history: List[Dict[str, str]] | None = None,
     ) -> Dict[str, Any]:
         flow_map = self.intent_flows_fast if mode == ExecutionMode.FAST else self.intent_flows_full
+        if task_config is not None and not task_config.enable_multi_agent:
+            flow_map = self.intent_flows_fast
         flow = flow_map.get(intent, ["search", "write"])
 
         artifacts: Dict[str, Any] = {}
@@ -330,15 +356,21 @@ class MultiAgentCoordinator:
         analyses: List[PaperAnalysis] = []
         debate: DebateResult | None = None
 
-        for step in flow:
+        for index, step in enumerate(flow):
             if step == "search":
                 search_result = self.search_agent.run(query, intent, slots, history or [], trace_id)
                 artifacts["search_result"] = search_result
             elif step == "analyze" and search_result is not None:
-                analyses = self.analyze_agent.run(search_result.papers, trace_id)
+                analysis_limit = self._resolve_analysis_limit(
+                    flow=flow,
+                    current_index=index,
+                    query=query,
+                    task_config=task_config,
+                )
+                analyses = self.analyze_agent.run(search_result.papers, trace_id, max_items=analysis_limit)
                 artifacts["analyses"] = analyses
             elif step == "debate":
-                debate = self.debate_agent.run(query, analyses, trace_id)
+                debate = self.debate_agent.run(query, analyses, trace_id, task_config=task_config)
                 artifacts["debate"] = debate
             elif step == "write":
                 artifacts["answer"] = self.write_agent.run(intent, query, search_result, analyses, debate, trace_id)
@@ -346,3 +378,45 @@ class MultiAgentCoordinator:
                 artifacts["answer"] = self.coder_agent.run(query, analyses, trace_id)
 
         return artifacts
+
+    def _resolve_analysis_limit(
+        self,
+        *,
+        flow: List[str],
+        current_index: int,
+        query: str,
+        task_config: TaskConfig | None,
+    ) -> int:
+        budget = self.llm.get_budget_status()
+        remaining = budget.get("remaining")
+        if remaining is None:
+            return 5
+        reserved = self._reserve_future_llm_calls(
+            flow=flow,
+            current_index=current_index,
+            query=query,
+            task_config=task_config,
+        )
+        available = max(int(remaining) - reserved, 0)
+        return min(5, available)
+
+    def _reserve_future_llm_calls(
+        self,
+        *,
+        flow: List[str],
+        current_index: int,
+        query: str,
+        task_config: TaskConfig | None,
+    ) -> int:
+        reserved = 0
+        preferred_modes = task_config.reasoning_modes if task_config is not None else None
+        for step in flow[current_index + 1 :]:
+            if step in {"write", "coder"}:
+                reserved += 1
+            elif step == "debate":
+                reserved += self.debate_agent.reasoning.estimate_llm_calls(
+                    query,
+                    mode="auto",
+                    preferred_modes=preferred_modes,
+                )
+        return reserved
