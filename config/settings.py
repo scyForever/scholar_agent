@@ -92,7 +92,7 @@ def _provider_defaults() -> Dict[str, Dict[str, Any]]:
         },
         "siliconflow": {
             "priority": 3,
-            "model": os.getenv("SILICONFLOW_MODEL", "Pro/deepseek-ai/DeepSeek-V3.2"),
+            "model": os.getenv("SILICONFLOW_MODEL", "Pro/moonshotai/Kimi-K2.5"),
             "base_url": os.getenv(
                 "SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1/chat/completions"
             ),

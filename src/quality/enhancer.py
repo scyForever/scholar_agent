@@ -16,7 +16,7 @@ class QualityEnhancer:
 
     def self_moa(self, query: str, context: str) -> MoAResult:
         real_providers = [name for name in self.llm.providers if name != "mock"]
-        explicit_providers = [name for name in real_providers if name != "scnet"][:3]
+        explicit_providers = [name for name in real_providers if name != "mock"][:3]
         candidates: List[str] = []
         errors: List[str] = []
         candidate_prompt = f"问题：{query}\n上下文：{context}\n请给出你的最佳回答。"
