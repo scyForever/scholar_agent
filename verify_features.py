@@ -31,10 +31,14 @@ def main() -> None:
     assert memory.recall("结构化回答", limit=3)
 
     agent = AgentV2()
+    status = agent.get_status()
+    assert "runtime_graph" in status
+    assert "multi_agent_graph" in status
     response = agent.chat("搜索近三年关于多智能体强化学习的论文", session_id="verify")
     assert response.answer
 
     assert TOOL_REGISTRY.list_tools()
+    assert TOOL_REGISTRY.list_langchain_tools(names=["search_arxiv", "search_openalex"])
     assert Path("data/memory").exists()
     print("验证完成，核心模块可用。")
 

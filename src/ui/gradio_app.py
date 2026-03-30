@@ -14,6 +14,9 @@ import gradio as gr
 from src.core.agent_v2 import AgentV2
 
 
+WEB_SESSION_ID = "web-user"
+BROWSER_HISTORY_KEY = "scholar_agent_history"
+
 STEP_COLORS = {
     "memory_recall": "#0f766e",
     "intent": "#1d4ed8",
@@ -28,6 +31,8 @@ STEP_COLORS = {
     "quality": "#be123c",
     "error": "#b91c1c",
 }
+
+STAGE_ORDER = ("analyze", "reasoning", "debate", "write")
 
 
 def _seconds_from_start(started_at: str, timestamp: str) -> str:
@@ -156,6 +161,89 @@ def _display_steps(trace: Dict[str, Any]) -> List[Dict[str, Any]]:
     return display_steps
 
 
+def _step_stage_key(step_type: str) -> str | None:
+    if step_type == "analyze":
+        return "analyze"
+    if step_type.startswith("reasoning:"):
+        return "reasoning"
+    if step_type == "debate":
+        return "debate"
+    if step_type == "write":
+        return "write"
+    return None
+
+
+def _collect_stage_models(trace: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    stage_models = {
+        stage: {"triggered": False, "calls": []}
+        for stage in STAGE_ORDER
+    }
+    for step in _display_steps(trace):
+        step_type = str(step.get("type") or "")
+        stage_key = _step_stage_key(step_type)
+        if stage_key is not None:
+            stage_models[stage_key]["triggered"] = True
+        if step_type != "llm":
+            continue
+        input_data = step.get("input") or {}
+        output = step.get("output") or {}
+        stage = str(input_data.get("stage") or output.get("stage") or "").strip()
+        if stage not in stage_models:
+            continue
+        stage_models[stage]["calls"].append(
+            {
+                "purpose": str(input_data.get("purpose") or ""),
+                "provider": str(output.get("provider") or ""),
+                "model": str(output.get("model") or ""),
+                "status": str(output.get("status") or ""),
+            }
+        )
+    return stage_models
+
+
+def _stage_model_summary(stage_data: Dict[str, Any]) -> str:
+    calls = list(stage_data.get("calls") or [])
+    if not stage_data.get("triggered") and not calls:
+        return "未触发"
+    if not calls:
+        return "未调用 LLM"
+
+    grouped: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for call in calls:
+        provider = str(call.get("provider") or "unknown")
+        model = str(call.get("model") or "unknown")
+        key = (provider, model)
+        entry = grouped.setdefault(
+            key,
+            {
+                "count": 0,
+                "purposes": [],
+                "statuses": [],
+            },
+        )
+        entry["count"] += 1
+        purpose = str(call.get("purpose") or "")
+        status = str(call.get("status") or "")
+        if purpose and purpose not in entry["purposes"]:
+            entry["purposes"].append(purpose)
+        if status and status not in entry["statuses"]:
+            entry["statuses"].append(status)
+
+    parts: List[str] = []
+    for (provider, model), entry in grouped.items():
+        suffix = f" x{entry['count']}" if entry["count"] > 1 else ""
+        if "error" in entry["statuses"]:
+            suffix += "（含失败）"
+        elif "running" in entry["statuses"]:
+            suffix += "（进行中）"
+        text = f"{provider} / {model}{suffix}"
+        purposes = "、".join(entry["purposes"][:3])
+        if purposes:
+            text += f" · {purposes}"
+        parts.append(text)
+    return "；".join(parts)
+
+
 def _search_chunk_details(step: Dict[str, Any]) -> str:
     output = step.get("output") or {}
     trace_payload = output.get("trace") or {}
@@ -200,6 +288,7 @@ def _search_chunk_details(step: Dict[str, Any]) -> str:
 
 def _format_timeline(trace: Dict[str, Any]) -> str:
     steps = _display_steps(trace)
+    stage_models = _collect_stage_models(trace)
     if not steps:
         return (
             "<div style='max-height:68vh;overflow-y:auto;scroll-behavior:smooth;padding-right:6px;'>"
@@ -215,7 +304,18 @@ def _format_timeline(trace: Dict[str, Any]) -> str:
         rel = _seconds_from_start(started_at, str(step.get("timestamp") or ""))
         summary = html.escape(_summarize_step(step))
         title = html.escape(_step_title(step))
-        extra = _search_chunk_details(step) if step_type == "search" else ""
+        stage_key = _step_stage_key(step_type)
+        stage_extra = ""
+        if stage_key is not None:
+            stage_summary = html.escape(_stage_model_summary(stage_models[stage_key]))
+            stage_extra = (
+                "<div style='margin-top:8px;font-size:13px;color:#111827;'>"
+                f"<strong>模型：</strong>{stage_summary}"
+                "</div>"
+            )
+        extra = stage_extra
+        if step_type == "search":
+            extra += _search_chunk_details(step)
         cards.append(
             (
                 "<div style='border:1px solid #e5e7eb;border-left:6px solid "
@@ -268,11 +368,24 @@ def _extract_intent(trace: Dict[str, Any]) -> str:
     return ""
 
 
-def _render_outputs(
+def _normalize_history(history: Any) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for item in history or []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip()
+        content = str(item.get("content") or "")
+        if role not in {"user", "assistant"}:
+            continue
+        normalized.append({"role": role, "content": content})
+    return normalized
+
+
+def _render_page_state(
     history: List[Dict[str, Any]],
     trace: Dict[str, Any],
-    assistant_content: str,
 ) -> tuple[
+    List[Dict[str, Any]],
     List[Dict[str, Any]],
     str,
     str,
@@ -283,6 +396,7 @@ def _render_outputs(
     str,
     str,
 ]:
+    normalized_history = _normalize_history(history)
     whitebox = json.dumps(trace, ensure_ascii=False, indent=2) if trace else ""
     trace_id = str(trace.get("trace_id") or "")
     status = str(trace.get("status") or "")
@@ -290,9 +404,9 @@ def _render_outputs(
     choices = _step_choices(trace)
     selected_step = choices[-1] if choices else None
     step_detail = _step_detail(trace, selected_step)
-    rendered_history = history[:-1] + [{"role": "assistant", "content": assistant_content}]
     return (
-        rendered_history,
+        normalized_history,
+        normalized_history,
         _extract_intent(trace),
         trace_id,
         status,
@@ -302,6 +416,26 @@ def _render_outputs(
         step_detail,
         whitebox,
     )
+
+
+def _render_outputs(
+    history: List[Dict[str, Any]],
+    trace: Dict[str, Any],
+    assistant_content: str,
+) -> tuple[
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    str,
+    str,
+    str,
+    str,
+    Dict[str, Any],
+    Any,
+    str,
+    str,
+    ]:
+    rendered_history = history[:-1] + [{"role": "assistant", "content": assistant_content}]
+    return _render_page_state(rendered_history, trace)
 
 
 def _step_detail(trace: Dict[str, Any], selected_step: str | None) -> str:
@@ -320,6 +454,35 @@ def _step_detail(trace: Dict[str, Any], selected_step: str | None) -> str:
 def create_app() -> gr.Blocks:
     agent = AgentV2()
 
+    def _sync_dialogue_history(history: List[Dict[str, Any]]) -> None:
+        state = agent.dialogue.get_state(WEB_SESSION_ID)
+        state.history = _normalize_history(history)
+
+    def handle_load(
+        browser_history: List[Dict[str, Any]] | None,
+    ) -> tuple[
+        List[Dict[str, Any]],
+        List[Dict[str, Any]],
+        str,
+        str,
+        str,
+        str,
+        Dict[str, Any],
+        Any,
+        str,
+        str,
+    ]:
+        browser_items = _normalize_history(browser_history)
+        state = agent.dialogue.get_state(WEB_SESSION_ID)
+        backend_items = _normalize_history(state.history)
+        if len(backend_items) >= len(browser_items):
+            history = backend_items
+        else:
+            history = browser_items
+            _sync_dialogue_history(history)
+        trace = agent.tracer.get_trace(state.last_trace_id) if state.last_trace_id else {}
+        return _render_page_state(history, trace)
+
     def handle_submit(
         message: str,
         history: List[Dict[str, Any]],
@@ -327,6 +490,7 @@ def create_app() -> gr.Blocks:
         fast_mode: bool,
         quality_mode: bool,
     ) -> Iterator[tuple[
+        List[Dict[str, Any]],
         List[Dict[str, Any]],
         str,
         str,
@@ -337,7 +501,8 @@ def create_app() -> gr.Blocks:
         str,
         str,
     ]]:
-        history = history or []
+        history = _normalize_history(history)
+        _sync_dialogue_history(history)
         if pdf_file:
             try:
                 agent.index_pdf(pdf_file)
@@ -362,7 +527,7 @@ def create_app() -> gr.Blocks:
             try:
                 shared["response"] = agent.chat(
                     message,
-                    session_id="web-user",
+                    session_id=WEB_SESSION_ID,
                     on_trace_start=lambda trace_id: shared.__setitem__("trace_id", trace_id),
                 )
             except Exception:
@@ -403,6 +568,7 @@ def create_app() -> gr.Blocks:
     with gr.Blocks(title="ScholarAgent") as demo:
         gr.Markdown("# ScholarAgent\n多 Agent 学术研究助手")
         trace_state = gr.State({})
+        browser_history = gr.BrowserState([], storage_key=BROWSER_HISTORY_KEY)
         with gr.Row():
             with gr.Column(scale=3):
                 chatbot = gr.Chatbot(label="对话记录")
@@ -425,9 +591,10 @@ def create_app() -> gr.Blocks:
 
         submit.click(
             handle_submit,
-            inputs=[message, chatbot, pdf_file, fast_mode, quality_mode],
+            inputs=[message, browser_history, pdf_file, fast_mode, quality_mode],
             outputs=[
                 chatbot,
+                browser_history,
                 intent_box,
                 trace_id_box,
                 trace_status,
@@ -438,6 +605,24 @@ def create_app() -> gr.Blocks:
                 whitebox,
             ],
             queue=True,
+        )
+        demo.load(
+            handle_load,
+            inputs=[browser_history],
+            outputs=[
+                chatbot,
+                browser_history,
+                intent_box,
+                trace_id_box,
+                trace_status,
+                timeline,
+                trace_state,
+                step_selector,
+                step_detail,
+                whitebox,
+            ],
+            queue=False,
+            show_progress="hidden",
         )
         step_selector.change(handle_step_change, inputs=[step_selector, trace_state], outputs=[step_detail])
     return demo.queue()

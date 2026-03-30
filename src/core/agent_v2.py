@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict
 from src.agents.multi_agent import MultiAgentCoordinator
 from src.core.llm import LLMManager
 from src.core.models import AgentResponse, ExecutionMode, MemoryType
+from src.core.runtime_graph import AgentRuntimeGraph
 from src.feedback.collector import FeedbackCollector
 from src.memory.manager import MemoryManager
 from src.planning.task_hierarchy import TaskHierarchyPlanner
@@ -35,7 +36,12 @@ class AgentV2:
         self.slot_filler = SlotFiller()
         self.planner = TaskHierarchyPlanner()
         self.retriever = HybridRetriever(llm=self.llm)
-        self.reasoning = ReasoningEngine(self.llm, self.tracer)
+        self.reasoning = ReasoningEngine(
+            self.llm,
+            self.tracer,
+            retriever=self.retriever,
+            whitelist=self.whitelist,
+        )
         self.quality = QualityEnhancer(self.llm)
         self.multi_agent = MultiAgentCoordinator(
             llm=self.llm,
@@ -43,6 +49,12 @@ class AgentV2:
             whitelist=self.whitelist,
             reasoning=self.reasoning,
             templates=self.templates,
+            tracer=self.tracer,
+        )
+        self.runtime_graph = AgentRuntimeGraph(
+            multi_agent=self.multi_agent,
+            reasoning=self.reasoning,
+            quality=self.quality,
             tracer=self.tracer,
         )
         self.execution_mode = ExecutionMode.STANDARD
@@ -130,58 +142,19 @@ class AgentV2:
                 },
             )
 
-            artifacts = self.multi_agent.execute(
+            runtime_result = self.runtime_graph.execute(
                 query=query,
                 intent=intent,
                 slots=slots,
-                mode=self.execution_mode,
                 trace_id=trace_id,
                 task_config=config,
                 history=self.dialogue.get_state(session_id).history,
+                memory_context=memory_context,
+                execution_mode=self.execution_mode,
+                enable_quality_enhance=self.enable_quality_enhance,
             )
-            answer = str(artifacts.get("answer") or "")
-
-            if not answer:
-                reasoning = self.reasoning.reason(
-                    query,
-                    memory_context,
-                    mode="auto",
-                    trace_id=trace_id,
-                    preferred_modes=config.reasoning_modes,
-                )
-                answer = reasoning.answer
-                artifacts["reasoning"] = reasoning
-
-            if self.enable_quality_enhance and self.execution_mode == ExecutionMode.FULL:
-                base_answer = answer
-                try:
-                    moa_result = self.quality.self_moa(query, answer)
-                    verification = self.quality.mpsc_verify(query, moa_result.answer)
-                    answer = moa_result.answer
-                    artifacts["moa"] = moa_result
-                    artifacts["verification"] = verification
-                    self.tracer.trace_step(
-                        trace_id,
-                        "quality",
-                        {"query": query},
-                        {
-                            "verification": verification.verdict,
-                            "moa_errors": moa_result.errors,
-                            "verification_errors": verification.errors,
-                        },
-                    )
-                except Exception as exc:
-                    answer = base_answer
-                    artifacts["quality_error"] = f"{type(exc).__name__}: {exc}"
-                    self.tracer.trace_step(
-                        trace_id,
-                        "quality",
-                        {"query": query},
-                        {
-                            "verification": "failed_but_preserved_answer",
-                            "error": f"{type(exc).__name__}: {exc}",
-                        },
-                    )
+            artifacts = dict(runtime_result.get("artifacts") or {})
+            answer = str(runtime_result.get("answer") or "")
 
             self.memory.store(
                 session_id,
@@ -226,6 +199,8 @@ class AgentV2:
         return {
             "mode": self.execution_mode.value,
             "quality_enhance": self.enable_quality_enhance,
+            "runtime_graph": self.runtime_graph.uses_langgraph(),
+            "multi_agent_graph": self.multi_agent.uses_langgraph(),
             "llm_status": self.llm.get_status(),
             "templates": list(self.templates.list_templates()),
         }

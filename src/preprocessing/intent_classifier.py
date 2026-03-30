@@ -7,6 +7,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from config.intent_config import INTENT_SPECS
 from src.core.llm import LLMManager
+from src.core.structured_outputs import IntentClassificationOutput
 from src.prompt_templates.manager import PromptTemplateManager
 
 
@@ -54,9 +55,13 @@ class IntentClassifier:
             intent_options=", ".join(INTENT_SPECS),
             query=query,
         )
-        result = self.llm.call_json(prompt, purpose="意图识别")
+        result = self.llm.call_structured(
+            prompt,
+            IntentClassificationOutput,
+            purpose="意图识别",
+        )
         return {
-            "intent": str(result.get("intent", "")),
-            "confidence": float(result.get("confidence", 0.0)),
-            "reason": str(result.get("reason", result.get("summary", ""))),
+            "intent": result.intent,
+            "confidence": float(result.confidence),
+            "reason": result.reason,
         }

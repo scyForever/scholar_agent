@@ -85,9 +85,14 @@ Python文件: 53个
 - OpenAI 兼容 provider 的 `base_url` 会统一规范到完整 `chat/completions` endpoint，减少接口地址配置错误。
 - `MemoryManager` 与 `HybridRetriever` 已改为按次创建 SQLite 连接，兼容 Gradio worker thread。
 - trace 每次写盘前都会确保 `logs/traces` 目录存在，避免目录缺失导致写盘失败。
-- 前端时间线中的同一次 `llm started / completed` 会按 `call_id` 合并成一张卡片，并支持滚动查看。
+- 执行时间线中的 `analyze / reasoning / debate / write` 阶段卡片会内联展示实际命中的模型。
+- 前端新增浏览器侧历史持久化，主题切换、浏览器返回和刷新后可恢复最近对话记录。
 - 长文写作与质量增强使用单独的长输出 token 配置，减少综述正文中途截断。
 - 新增 `rebuild_chroma_index.py`，可从现有 `rag_index.db` 一键重建 `ChromaDB` 向量索引。
+- `ReAct` 已升级为真实工具循环，可调用本地 RAG 与白名单工具。
+- `ToT` 已升级为显式分支扩展、打分与剪枝的树搜索。
+- `Debate` 已升级为正方、反方、复辩、主持四轮多代理对辩。
+- 搜索工具规划阶段固定使用 `zhipu`；若 `zhipu` 不可用，则回退到确定性检索。
 
 ### 2.2 支持的任务类型
 
@@ -672,6 +677,12 @@ rewritten_queries = self.rewriter.rewrite(
 
 这样中文术语、缩写和中英混合主题会优先被改写成更适合英文数据库的标准学术检索式。
 
+外部搜索阶段还新增了一层运行时约束：
+
+- 搜索工具规划通过 `LangChain agent` 执行时，固定只使用 `zhipu`
+- 若 `zhipu` 不可用、LangChain agent 运行失败或无可用工具，则自动退回确定性多源检索
+- 搜索到的外部论文结果只保留在本轮 `search_result` 与 trace 中，不会自动写入本地 RAG 向量库
+
 #### 5.2.4 本地 RAG 检索链路
 
 当前本地 RAG 采用“共享改写计划 + 词法/向量并行检索 + 融合重排”的流程：
@@ -887,11 +898,20 @@ class ReasoningEngine:
 
 另外，`ReasoningEngine` 现在还会估算不同推理模式的调用开销：
 
-- `direct / cot / react / tot / debate`：1次
+- `direct / cot`：1次
+- `react`：4次预算预估值
+- `tot`：6次预算预估值
+- `debate`：4次预算预估值
 - `reflection`：2次
 - `cove`：3次
 
 这个估算值会被执行器用于给 `AnalyzeAgent` 留出后续 `debate / write` 所需预算。
+
+当前三种关键模式已经不是“单条提示词模拟”：
+
+- `react`：每轮先让模型输出 JSON 决策，再真实调用工具，再根据观察决定下一步；可调用本地 `search_local_rag` 与 `reasoning_agent` 白名单工具
+- `tot`：先扩展多条候选分支，再对分支打分并做 beam 剪枝，最后基于最佳路径综合输出
+- `debate`：按“正方立论 -> 反方质询 -> 正方复辩 -> 主持裁决”执行多轮多代理对辩
 
 #### 5.4.2 推理模式对比
 
@@ -899,9 +919,9 @@ class ReasoningEngine:
 |------|----------|------|
 | Direct | 简单问答 | 快速，单次调用 |
 | CoT | 逻辑推理 | 逐步推理 |
-| ReAct | 需要工具调用 | 推理+行动交替 |
-| ToT | 复杂决策 | 多分支探索 |
-| Debate | 争议性问题 | 多视角对抗 |
+| ReAct | 需要工具调用 | 真实工具循环，逐轮 `thought -> action -> observation` |
+| ToT | 复杂决策 | 显式分支扩展、打分与剪枝 |
+| Debate | 争议性问题 | 正方/反方/复辩/主持的多代理对辩 |
 | Reflection | 需要优化 | 自我反思改进 |
 | CoVe | 需要验证 | 生成+验证+修正 |
 
@@ -1155,9 +1175,10 @@ class WhiteboxTracer:
 
 Gradio 前端会实时轮询 trace，并将这些步骤渲染成右侧执行时间线，而不再只展示 JSON。前端展示层还会：
 
-- 将同一次 `llm started / completed` 按 `call_id` 合并成一条可视步骤
 - 在运行中显示“这次模型调用要做什么”
-- 完成后直接替换为 `provider / model / latency`
+- 完成后显示 `provider / model / latency`
+- 在 `analyze / reasoning / debate / write` 阶段卡片中内联展示阶段实际使用的模型
+- 用浏览器本地状态恢复最近对话，因此主题切换、返回和刷新后通常还能看到最近历史
 - 将时间线放入固定高度滚动容器，便于长链路观察
 
 ---
@@ -1576,22 +1597,24 @@ llm_long_output_max_tokens: int = 32000
 > |------|----------|------------|
 > | Direct | 简单问答 | 1 |
 > | CoT | 逻辑推理 | 1 |
-> | ReAct | 需要工具 | 3-5 |
-> | ToT | 复杂决策 | 5-10 |
-> | Debate | 争议问题 | 3 |
-> | Reflection | 需要优化 | 2-3 |
+> | ReAct | 需要工具 | 预算预估 4；真实执行为“决策 -> 工具 -> 观察”循环 |
+> | ToT | 复杂决策 | 预算预估 6；真实执行为树扩展 + 打分剪枝 |
+> | Debate | 争议问题 | 预算预估 4；真实执行为四轮多代理对辩 |
+> | Reflection | 需要优化 | 2 |
 > | CoVe | 需要验证 | 3 |
 > 
 > 自动选择策略：
 > ```python
-> if task_level <= L2:
->     mode = "direct"
-> elif requires_tools:
->     mode = "react"
-> elif is_controversial:
+> if "比较" in query:
 >     mode = "debate"
-> elif task_level >= L4:
->     mode = "cot" + "reflection"
+> elif "综述" in query:
+>     mode = "reflection"
+> elif "实现" in query or "流程" in query:
+>     mode = "react"
+> elif "trade-off" in query or "path" in query:
+>     mode = "tot"
+> else:
+>     mode = "cot" or "direct"
 > ```
 
 #### Q4: 质量增强如何实现？

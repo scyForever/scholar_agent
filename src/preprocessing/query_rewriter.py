@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.core.llm import LLMManager
+from src.core.structured_outputs import QueryRewriteOutput
 
 
 REQUEST_PREFIXES = (
@@ -125,13 +126,14 @@ class QueryRewriter:
             self._rewrite_cache[cache_key] = plan
             return plan
 
-        raw = self.llm.call_json(
+        raw = self.llm.call_structured(
             self._rewrite_prompt(normalized_query, intent),
+            QueryRewriteOutput,
             temperature=0.0,
             max_tokens=500,
             purpose="查询改写",
         )
-        plan = self._parse_plan(raw, normalized_query)
+        plan = self._parse_plan(raw.model_dump(mode="json"), normalized_query)
         self._rewrite_cache[cache_key] = plan
         return plan
 

@@ -211,3 +211,4 @@ reports/
 cache/
 data/memory/
 data/vector_db/
+.codex
