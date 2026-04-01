@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, TypedDict
 
 from src.agents.multi_agent import MultiAgentCoordinator
-from src.core.models import ExecutionMode
+from src.core.models import ExecutionMode, SearchResult
 from src.planning.task_hierarchy import TaskConfig
 from src.quality.enhancer import QualityEnhancer
 from src.reasoning.engine import ReasoningEngine
@@ -26,6 +26,7 @@ class RuntimeState(TypedDict, total=False):
     task_config: TaskConfig | None
     history: List[Dict[str, str]]
     memory_context: str
+    prior_search_result: SearchResult | None
     execution_mode: ExecutionMode
     enable_quality_enhance: bool
     answer: str
@@ -60,6 +61,7 @@ class AgentRuntimeGraph:
         task_config: TaskConfig,
         history: List[Dict[str, str]],
         memory_context: str,
+        prior_search_result: SearchResult | None,
         execution_mode: ExecutionMode,
         enable_quality_enhance: bool,
     ) -> Dict[str, Any]:
@@ -72,6 +74,7 @@ class AgentRuntimeGraph:
             "task_config": task_config,
             "history": history,
             "memory_context": memory_context,
+            "prior_search_result": prior_search_result,
             "execution_mode": execution_mode,
             "enable_quality_enhance": enable_quality_enhance,
             "artifacts": {},
@@ -122,6 +125,7 @@ class AgentRuntimeGraph:
             trace_id=state["trace_id"],
             task_config=state.get("task_config"),
             history=state.get("history") or [],
+            prior_search_result=state.get("prior_search_result"),
         )
         answer = str(artifacts.get("answer") or "")
         return {
@@ -203,6 +207,7 @@ class AgentRuntimeGraph:
             trace_id=state["trace_id"],
             task_config=state.get("task_config"),
             history=state.get("history") or [],
+            prior_search_result=state.get("prior_search_result"),
         )
         answer = str(artifacts.get("answer") or "")
 

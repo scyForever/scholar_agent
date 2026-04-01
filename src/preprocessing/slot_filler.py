@@ -23,6 +23,49 @@ class SlotFiller:
         "九": 9,
         "十": 10,
     }
+    PREVIOUS_SEARCH_MARKERS = (
+        "根据之前查找到的资料",
+        "根据之前查到的资料",
+        "根据前面查到的资料",
+        "基于之前查找到的资料",
+        "结合之前查找到的资料",
+        "根据之前搜索到的资料",
+        "根据上一次检索到的资料",
+        "根据刚才查找到的资料",
+        "根据前面的检索结果",
+        "根据之前的检索结果",
+    )
+    LOCAL_ONLY_MARKERS = (
+        "只查本地",
+        "只用本地",
+        "仅查本地",
+        "仅用本地",
+        "只基于本地",
+        "仅基于本地",
+        "只根据本地",
+        "仅根据本地",
+        "只查rag",
+        "只用rag",
+        "仅查rag",
+        "仅用rag",
+        "只查知识库",
+        "只用知识库",
+        "仅查知识库",
+        "仅用知识库",
+    )
+    NO_RETRIEVAL_MARKERS = (
+        "不要查",
+        "不用查",
+        "无需检索",
+        "不要检索",
+        "不用检索",
+        "别检索",
+        "别查资料",
+        "不要查资料",
+        "不用查资料",
+        "不需要查资料",
+        "无需查资料",
+    )
 
     def fill_slots_once(
         self,
@@ -55,6 +98,14 @@ class SlotFiller:
         comparison_target = self._extract_comparison_target(normalized)
         if comparison_target:
             slots["comparison_target"] = comparison_target
+
+        context_source = self._extract_context_source(normalized)
+        if context_source:
+            slots["context_source"] = context_source
+
+        rag_mode = self._extract_rag_mode(normalized)
+        if rag_mode:
+            slots["rag_mode"] = rag_mode
 
         topic = self._extract_topic(normalized, intent)
         if topic:
@@ -91,7 +142,8 @@ class SlotFiller:
             return ""
         if self.MAX_PAPERS_PATTERN.fullmatch(query.strip()):
             return ""
-        cleaned = re.sub(r"请|帮我|想要|给我|搜索|检索|写一篇|生成|分析|解释|比较|介绍", "", query)
+        cleaned = self._strip_context_control_phrases(query)
+        cleaned = re.sub(r"请|帮我|想要|给我|搜索|检索|写一篇|生成|分析|解释|比较|介绍|直接", "", cleaned)
         cleaned = self.YEAR_RANGE_PATTERN.sub("", cleaned)
         cleaned = self.RECENT_YEARS_PATTERN.sub("", cleaned)
         cleaned = re.sub(r"^(关于|有关)\s*", "", cleaned)
@@ -116,3 +168,29 @@ class SlotFiller:
         if "十" in normalized and len(normalized) == 3:
             return self.CHINESE_NUMBERS.get(normalized[0], 0) * 10 + self.CHINESE_NUMBERS.get(normalized[2], 0)
         return self.CHINESE_NUMBERS.get(normalized, 0)
+
+    def _extract_context_source(self, query: str) -> str:
+        normalized = query.strip().lower()
+        if any(marker in normalized for marker in self.PREVIOUS_SEARCH_MARKERS):
+            return "previous_search"
+        return ""
+
+    def _extract_rag_mode(self, query: str) -> str:
+        normalized = query.strip().lower()
+        if any(marker in normalized for marker in self.LOCAL_ONLY_MARKERS):
+            return "local_only"
+        if any(marker in normalized for marker in self.NO_RETRIEVAL_MARKERS):
+            return "off"
+        return ""
+
+    def _strip_context_control_phrases(self, query: str) -> str:
+        cleaned = query
+        for marker in self.PREVIOUS_SEARCH_MARKERS:
+            cleaned = re.sub(re.escape(marker), "", cleaned, flags=re.IGNORECASE)
+        for marker in self.LOCAL_ONLY_MARKERS:
+            cleaned = re.sub(re.escape(marker), "", cleaned, flags=re.IGNORECASE)
+        for marker in self.NO_RETRIEVAL_MARKERS:
+            cleaned = re.sub(re.escape(marker), "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^(根据|基于|结合|参考)\s*", "", cleaned)
+        cleaned = re.sub(r"\s*(资料|检索结果|搜索结果|搜索到的内容|查找到的资料)\s*", " ", cleaned)
+        return " ".join(cleaned.split())

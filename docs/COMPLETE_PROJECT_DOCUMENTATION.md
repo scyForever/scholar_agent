@@ -43,6 +43,7 @@
 - 搜索工具层已统一接入 `arXiv / OpenAlex / Semantic Scholar / Web of Science / PubMed / IEEE Xplore / Google Scholar`
 - 文档层支持 `DOI / arXiv ID / PMID / PMCID` 获取，以及 PDF 章节解析和 OCR
 - `SearchAgent` 会先尝试本地 RAG，再补外部学术搜索
+- `explain_concept` 可复用当前会话最近一次检索结果，并支持 `只用RAG / 不要检索` 控制
 - 搜索规划优先尝试已验证成功的 `zhipu`；不可用时退回确定性搜索
 - 本地 RAG 使用 `TF-IDF + BM25 + BGE-M3 + RRF + BGE Reranker + 相关性校验`
 - 研究层增加了 `ResearchPlannerAgent / ResearchSearchAgent / ResearchReadingAgent / ResearchMemoryAgent`

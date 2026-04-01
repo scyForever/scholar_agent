@@ -219,6 +219,7 @@ class DialogueState:
     missing_slots: List[str] = field(default_factory=list)
     history: List[Dict[str, str]] = field(default_factory=list)
     last_trace_id: str = ""
+    last_search_result: Optional[SearchResult] = None
 
 
 @dataclass(slots=True)

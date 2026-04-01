@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict
 
 from src.agents.multi_agent import MultiAgentCoordinator
 from src.core.llm import LLMManager
-from src.core.models import AgentResponse, ExecutionMode, MemoryType
+from src.core.models import AgentResponse, ExecutionMode, MemoryType, SearchResult
 from src.core.runtime_graph import AgentRuntimeGraph
 from src.feedback.collector import FeedbackCollector
 from src.memory.manager import MemoryManager
@@ -82,6 +82,7 @@ class AgentV2:
         on_trace_start: Callable[[str], None] | None = None,
     ) -> AgentResponse:
         state = self.dialogue.get_state(session_id)
+        prior_search_result = state.last_search_result
         self.dialogue.add_user_message(session_id, query)
         trace_id = self.tracer.start_trace(session_id, query, {"mode": self.execution_mode.value})
         if on_trace_start is not None:
@@ -154,11 +155,15 @@ class AgentV2:
                 task_config=config,
                 history=self.dialogue.get_state(session_id).history,
                 memory_context=memory_context,
+                prior_search_result=prior_search_result,
                 execution_mode=self.execution_mode,
                 enable_quality_enhance=self.enable_quality_enhance,
             )
             artifacts = dict(runtime_result.get("artifacts") or {})
             answer = str(runtime_result.get("answer") or "")
+            latest_search_result = artifacts.get("search_result")
+            if isinstance(latest_search_result, SearchResult):
+                self.dialogue.update_state(session_id, last_search_result=latest_search_result)
 
             self.memory.store(
                 session_id,

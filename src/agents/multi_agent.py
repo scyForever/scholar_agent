@@ -58,6 +58,7 @@ class MultiAgentState(TypedDict, total=False):
     trace_id: str
     task_config: TaskConfig | None
     history: List[Dict[str, str]]
+    prior_search_result: SearchResult | None
     flow: List[str]
     research_plan: ResearchPlan | None
     search_result: SearchResult | None
@@ -90,12 +91,47 @@ class SearchAgent:
         history: List[Dict[str, str]],
         trace_id: str,
         session_id: str = "",
+        prior_search_result: SearchResult | None = None,
     ) -> SearchResult:
         topic = str(slots.get("topic") or slots.get("paper_title") or query)
         time_range = str(slots.get("time_range") or "")
         max_results = int(slots.get("max_papers") or 12)
+        context_source = str(slots.get("context_source") or "")
+        rag_mode = str(slots.get("rag_mode") or "auto")
+        if context_source == "previous_search" and prior_search_result is not None:
+            result = SearchResult(
+                query=topic,
+                papers=list(prior_search_result.papers),
+                total_found=prior_search_result.total_found,
+                source_breakdown=dict(prior_search_result.source_breakdown),
+                rewritten_queries=list(prior_search_result.rewritten_queries),
+                trace={
+                    **dict(prior_search_result.trace),
+                    "search_mode": "reuse_previous_search",
+                    "context_source": "previous_search",
+                    "reused_from_previous_search": True,
+                    "original_search_query": prior_search_result.query,
+                },
+            )
+            self.tracer.trace_step(trace_id, "search", {"query": topic}, asdict(result))
+            return result
         rewrite_plan = self.rewriter.plan(topic, intent=intent)
         rewritten_queries = rewrite_plan.external_queries
+        if rag_mode == "off":
+            result = SearchResult(
+                query=topic,
+                papers=[],
+                total_found=0,
+                source_breakdown={},
+                rewritten_queries=[],
+                trace={
+                    "local_rag": {"results": [], "supplement": [], "trace": {"disabled_by_instruction": True}},
+                    "search_mode": "disabled_by_instruction",
+                    "rag_mode": "off",
+                },
+            )
+            self.tracer.trace_step(trace_id, "search", {"query": topic}, asdict(result))
+            return result
         local_context = self.retriever.retrieve(
             topic,
             history,
@@ -103,6 +139,22 @@ class SearchAgent:
             rewritten_queries=rewrite_plan.local_queries,
             rewrite_plan=rewrite_plan,
         )
+        if rag_mode == "local_only":
+            local_hit_count = len(local_context.get("results") or [])
+            result = SearchResult(
+                query=topic,
+                papers=[],
+                total_found=0,
+                source_breakdown={"local_rag": local_hit_count} if local_hit_count else {},
+                rewritten_queries=list(rewrite_plan.local_queries),
+                trace={
+                    "local_rag": local_context,
+                    "search_mode": "local_rag_only_by_instruction",
+                    "rag_mode": "local_only",
+                },
+            )
+            self.tracer.trace_step(trace_id, "search", {"query": topic}, asdict(result))
+            return result
         if intent == "analyze_paper" and local_context.get("results"):
             result = SearchResult(
                 query=topic,
@@ -1184,8 +1236,15 @@ class MultiAgentCoordinator:
         task_config: TaskConfig | None = None,
         history: List[Dict[str, str]] | None = None,
         session_id: str = "",
+        prior_search_result: SearchResult | None = None,
     ) -> Dict[str, Any]:
-        flow = self._resolve_flow(intent=intent, mode=mode, task_config=task_config)
+        flow = self._resolve_flow(
+            intent=intent,
+            mode=mode,
+            task_config=task_config,
+            slots=slots,
+            prior_search_result=prior_search_result,
+        )
         if self.graph is None:
             return self._execute_sequential(
                 query=query,
@@ -1195,6 +1254,7 @@ class MultiAgentCoordinator:
                 task_config=task_config,
                 history=history or [],
                 session_id=session_id,
+                prior_search_result=prior_search_result,
                 flow=flow,
             )
 
@@ -1208,6 +1268,7 @@ class MultiAgentCoordinator:
                 "trace_id": trace_id,
                 "task_config": task_config,
                 "history": history or [],
+                "prior_search_result": prior_search_result,
                 "flow": flow,
                 "artifacts": {},
             }
@@ -1254,6 +1315,7 @@ class MultiAgentCoordinator:
             state.get("history", []),
             state["trace_id"],
             session_id=state.get("session_id", ""),
+            prior_search_result=state.get("prior_search_result"),
         )
         return self._state_update(state, search_result=search_result)
 
@@ -1331,6 +1393,7 @@ class MultiAgentCoordinator:
         task_config: TaskConfig | None,
         history: List[Dict[str, str]],
         session_id: str,
+        prior_search_result: SearchResult | None,
         flow: List[str],
     ) -> Dict[str, Any]:
         artifacts: Dict[str, Any] = {}
@@ -1345,7 +1408,13 @@ class MultiAgentCoordinator:
                 artifacts["research_plan"] = research_plan
             elif step == "search":
                 search_result = self.search_agent.run(
-                    query, intent, slots, history, trace_id, session_id=session_id
+                    query,
+                    intent,
+                    slots,
+                    history,
+                    trace_id,
+                    session_id=session_id,
+                    prior_search_result=prior_search_result,
                 )
                 artifacts["search_result"] = search_result
             elif step == "analyze" and search_result is not None:
@@ -1389,6 +1458,8 @@ class MultiAgentCoordinator:
         intent: str,
         mode: ExecutionMode,
         task_config: TaskConfig | None,
+        slots: Dict[str, Any],
+        prior_search_result: SearchResult | None,
     ) -> List[str]:
         flow_map = (
             self.intent_flows_fast
@@ -1397,7 +1468,25 @@ class MultiAgentCoordinator:
         )
         if task_config is not None and not task_config.enable_multi_agent:
             flow_map = self.intent_flows_fast
-        return list(flow_map.get(intent, ["search", "write"]))
+        flow = list(flow_map.get(intent, ["search", "write"]))
+
+        if intent != "explain_concept":
+            return flow
+
+        rag_mode = str(slots.get("rag_mode") or "auto")
+        context_source = str(slots.get("context_source") or "")
+        if rag_mode == "off":
+            return ["write"]
+        if rag_mode == "local_only":
+            return ["search", "write"]
+        if context_source == "previous_search":
+            return ["search", "write"]
+        if prior_search_result is not None and any(
+            marker in str(slots.get("topic") or "")
+            for marker in ("之前查找到的资料", "之前查到的资料", "之前搜索到的资料", "之前的检索结果", "前面的检索结果")
+        ):
+            return ["search", "write"]
+        return flow
 
     def _flow_index(self, flow: List[str], step_name: str) -> int:
         try:
