@@ -4,12 +4,31 @@
     "search_openalex",
     "search_semantic_scholar",
     "search_web_of_science",
-    "search_web"
+    "search_web",
+    "search_pubmed",
+    "search_ieee_xplore",
+    "search_google_scholar",
+    "search_literature"
   ],
   "analyze_agent": [
-    "extract_pdf_text"
+    "extract_pdf_text",
+    "fetch_paper_asset",
+    "parse_pdf_document",
+    "extract_paper_visuals",
+    "read_paper_section"
   ],
   "debate_agent": [],
   "write_agent": [],
-  "coder_agent": []
+  "coder_agent": [],
+  "reasoning_agent": [
+    "search_arxiv",
+    "search_openalex",
+    "search_semantic_scholar",
+    "search_web_of_science",
+    "search_web",
+    "search_pubmed",
+    "search_ieee_xplore",
+    "search_google_scholar",
+    "search_literature"
+  ]
 }

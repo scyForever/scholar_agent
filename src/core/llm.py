@@ -749,6 +749,25 @@ class LLMManager:
     def get_healthy_provider_names(self) -> List[str]:
         return list(self._get_healthy_providers())
 
+    def get_verified_provider_names(self) -> List[str]:
+        verified: List[str] = []
+        for name, status in self.provider_status.items():
+            if name == "mock":
+                continue
+            if status.available and status.last_success_at > 0:
+                verified.append(name)
+        verified.sort(
+            key=lambda item: (
+                self.provider_status[item].last_success_at,
+                self.providers[item].priority,
+            ),
+            reverse=True,
+        )
+        return verified
+
+    def has_verified_provider(self) -> bool:
+        return bool(self.get_verified_provider_names())
+
     def record_provider_failure(self, provider_name: str) -> None:
         if provider_name in self.provider_status:
             self._record_failure(provider_name)

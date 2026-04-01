@@ -16,7 +16,7 @@ class QualityEnhancer:
 
     def self_moa(self, query: str, context: str) -> MoAResult:
         real_providers = [name for name in self.llm.providers if name != "mock"]
-        explicit_providers = [name for name in real_providers if name != "mock"][:3]
+        explicit_providers = self.llm.get_verified_provider_names()[:3]
         candidates: List[str] = []
         errors: List[str] = []
         candidate_prompt = f"问题：{query}\n上下文：{context}\n请给出你的最佳回答。"
@@ -35,7 +35,7 @@ class QualityEnhancer:
                     )
                 except Exception as exc:
                     errors.append(f"{provider}: {type(exc).__name__}: {exc}")
-        elif real_providers:
+        elif real_providers and self.llm.has_verified_provider():
             for temperature in (0.1, 0.4, 0.7):
                 try:
                     candidates.append(
@@ -55,6 +55,7 @@ class QualityEnhancer:
                     candidates.append(
                         self.llm.call(
                             candidate_prompt,
+                            provider="mock",
                             temperature=temperature,
                             max_tokens=settings.llm_long_output_max_tokens,
                             purpose="质量增强候选",

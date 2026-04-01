@@ -1,17 +1,28 @@
 # 快速开始
 
-本文档面向“先跑起来，再逐步理解项目”的场景。
+本文档面向“先把项目跑起来，再逐步理解实现”的场景。
 
-## 1. 运行环境
+## 1. 前置条件
+
+至少准备以下环境：
+
+- Python 3.11+
+- 可用的 `pip`
+- 一个可用的本地终端环境
+- 如果要启用 OCR，需要安装 `tesseract`
+- 如果要启用本地 RAG，需要准备 `bge-m3` 和 `bge-reranker-v2-m3` 本地模型目录
+
+## 2. 安装依赖
 
 推荐直接使用现有 `conda` 环境：
 
 ```bash
 source /home/a1/miniconda3/etc/profile.d/conda.sh
 conda activate agent
+pip install -r requirements.txt
 ```
 
-如果你需要自行创建环境：
+如果你需要自己创建环境：
 
 ```bash
 python -m venv venv
@@ -19,24 +30,53 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## 2. 基础配置
+## 3. OCR 检查
 
-至少准备以下 API Key 中的一部分：
+项目中的图片 OCR 依赖 `tesseract` 可执行文件。确认方式：
 
-- `ZHIPU_API_KEY`
+```bash
+tesseract --version
+```
+
+如果未安装，可按你的系统方式安装。使用 conda 时可参考：
+
+```bash
+conda install -c conda-forge tesseract
+```
+
+## 4. 最小配置
+
+### 4.1 LLM Provider
+
+建议至少配置一个真实 provider：
+
 - `SCNET_API_KEY`
 - `SILICONFLOW_API_KEY`
+- `ZHIPU_API_KEY`
 - `DEEPSEEK_API_KEY`
 - `DASHSCOPE_API_KEY`
+
+不配置也能运行，但会退化为本地规则和 mock provider。
+
+### 4.2 学术搜索源
+
+按需配置：
+
 - `WOS_STARTER_API_KEY`
+- `IEEE_XPLORE_API_KEY`
+- `SERPAPI_API_KEY`
+- `NCBI_API_KEY`
 
-说明：
+### 4.3 本地 RAG
 
-- 当前运行时的“搜索工具规划”固定使用 `zhipu`
-- 若 `zhipu` 不可用，搜索节点会退回确定性检索
-- 上传 PDF 后才会进入本地 RAG；外部搜索结果不会自动写入向量库
+如果要启用本地向量检索，至少确认：
 
-## 3. 启动项目
+```bash
+export BGE_M3_MODEL_PATH="/你的本地/bge-m3"
+export BGE_RERANKER_MODEL_PATH="/你的本地/bge-reranker-v2-m3"
+```
+
+## 5. 启动项目
 
 ```bash
 python run.py
@@ -48,41 +88,47 @@ python run.py
 2. 命令行
 3. 功能验证
 
-## 4. 推荐的首次验证
+## 6. 推荐验证顺序
 
-### 4.1 验证 Web 或 CLI 是否可启动
+### 6.1 基础功能验证
 
 ```bash
-python run.py
+python verify_features.py
 ```
 
-### 4.2 验证搜索规划链路
+适合先确认：
+
+- 核心模块能否初始化
+- 工具注册和白名单是否正常
+- 研究规划与论文获取是否可用
+
+### 6.2 搜索 agent 验证
 
 ```bash
 python verify_agentic_search.py
 ```
 
-这个脚本会直接检查：
+适合确认：
 
-- 搜索工具规划是否能跑通
-- 实际命中的 provider 是谁
-- `agent_selected_tools / agent_tool_calls / agent_final_output` 是否产出
+- 查询改写是否正常
+- 外部学术源能否返回结果
+- 搜索工具规划是否命中 `LangChain agent` 路径
 
-### 4.3 验证单个 provider 连通性
+说明：
 
-```bash
-python test_provider_access.py --provider zhipu
-```
+- 这一步需要至少一个真实 provider
+- 当前搜索规划优先使用已验证成功的 `zhipu`
+- 若没有可用规划 provider，运行时会自动回退到确定性搜索
 
-## 5. 使用建议
+## 7. 首次使用建议
 
-- 如果你要分析本地论文，先上传 PDF，再提问
-- 如果你要看系统内部过程，优先用 Web 界面，右侧有执行时间线
-- 如果你发现改主题或刷新后历史不见了，先确认是否使用同一浏览器；当前前端会通过浏览器本地状态恢复最近对话
+- 如果你要分析本地论文，先上传 PDF 或先调用 `index_pdf`
+- 如果你要看执行过程，优先使用 Web 界面，右侧可以看 trace 时间线
+- 如果你主要做研究型任务，可以优先用 `plan_research -> fetch_paper -> read_paper -> chat` 这条链路
 
-## 6. 继续阅读
+## 8. 继续阅读
 
-- 主说明文档：[README.md](../README.md)
-- 项目文档入口：[PROJECT_DOCUMENTATION.md](./PROJECT_DOCUMENTATION.md)
-- 完整项目文档：[ScholarAgent_完整项目文档.md](../ScholarAgent_完整项目文档.md)
-- 面试速记版：[INTERVIEW_GUIDE.md](./INTERVIEW_GUIDE.md)
+- 主说明文档：`README.md`
+- 文档总览：`PROJECT_DOCUMENTATION.md`
+- 完整项目文档：`../ScholarAgent_完整项目文档.md`
+- 面试速记版：`INTERVIEW_GUIDE.md`

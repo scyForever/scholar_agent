@@ -1,74 +1,91 @@
-# 项目文档
+# 项目文档索引
 
-`docs/` 目录面向不同阅读目标提供不同粒度的说明，当前文档已同步到最近一轮实现，包括：
+当前文档已经按最新实现同步，核心口径如下：
 
-- 搜索工具规划固定使用 `zhipu`
-- `ReAct / ToT / Debate` 已升级为真实多步推理流程
-- 前端执行时间线支持阶段模型展示与最近历史恢复
+- 架构已拆分为 `tools -> skills -> agents -> runtime`
+- 本地 RAG 基于 `SQLite + Chroma + BGE-M3 + BGE Reranker`
+- 研究层新增了论文获取、深度阅读、研究规划、研究记忆
+- OCR 已接入文档解析链路
+- 搜索规划优先尝试已验证成功的 `zhipu`，否则自动降级为确定性搜索
 
-## 文档索引
+## 1. 文档阅读入口
 
-### 1. 快速上手
+### 1.1 主说明文档
 
-- [QUICKSTART.md](./QUICKSTART.md)
+- `../README.md`
+
+适合：
+
+- 快速了解项目是什么
+- 查看能力边界、配置项和运行方式
+
+### 1.2 快速开始
+
+- `./QUICKSTART.md`
 
 适合：
 
 - 第一次运行项目
-- 只想知道怎么启动、怎么验证
+- 快速检查依赖、OCR 和验证脚本
 
-### 2. 主说明文档
+### 1.3 完整项目文档
 
-- [README.md](../README.md)
-
-适合：
-
-- 快速了解项目能力、配置、常用命令
-- 查看当前实现的高层行为
-
-### 3. 完整设计文档
-
-- [ScholarAgent_完整项目文档.md](../ScholarAgent_完整项目文档.md)
+- `../ScholarAgent_完整项目文档.md`
 
 适合：
 
-- 需要系统理解架构、执行链路和模块边界
-- 需要排查推理、检索、RAG、前端可观测性等细节
+- 系统理解整体架构
+- 追踪从检索到写作的完整链路
+- 查阅核心模块与数据流
 
-### 4. 面试速记版
+### 1.4 完整文档入口
 
-- [INTERVIEW_GUIDE.md](./INTERVIEW_GUIDE.md)
-
-适合：
-
-- 准备项目汇报
-- 准备面试问答
-- 需要快速复述设计取舍
-
-### 5. 可视化补充材料
-
-- [RAG_v3_完整流程图.html](../RAG_v3_完整流程图.html)
+- `./COMPLETE_PROJECT_DOCUMENTATION.md`
 
 适合：
 
-- 需要图形化理解本地 RAG 流程
+- 快速定位完整文档中该看哪一章
+- 从主题维度查找阅读路径
 
-## 推荐阅读顺序
+### 1.5 面试速记版
 
-1. 先看 [README.md](../README.md)
-2. 再看 [QUICKSTART.md](./QUICKSTART.md)
-3. 然后看 [ScholarAgent_完整项目文档.md](../ScholarAgent_完整项目文档.md)
-4. 最后按需看 [INTERVIEW_GUIDE.md](./INTERVIEW_GUIDE.md)
+- `./INTERVIEW_GUIDE.md`
 
-## 当前文档边界
+适合：
 
-- `README` 负责“是什么、怎么跑、当前行为”
-- `docs/` 负责“怎么读、怎么汇报、从哪里进入”
-- 根目录完整项目文档负责“实现细节与设计解释”
+- 项目汇报
+- 面试问答准备
+- 快速复述设计取舍
 
-如果以后代码行为再调整，优先更新顺序建议是：
+### 1.6 可视化补充材料
 
-1. `README`
+- `../RAG_v3_完整流程图.html`
+
+适合：
+
+- 图形化理解本地 RAG 链路
+
+## 2. 推荐阅读顺序
+
+1. 先看 `../README.md`
+2. 再看 `./QUICKSTART.md`
+3. 然后看 `../ScholarAgent_完整项目文档.md`
+4. 最后按需看 `./INTERVIEW_GUIDE.md`
+
+## 3. 当前实现的几个关键提醒
+
+- 本地 RAG 和外部学术搜索是协同关系，不是同一个存储层
+- 外部检索结果不会自动写入本地向量库
+- 搜索规划不是固定依赖远程 LLM；远程不可用时会退回本地确定性策略
+- OCR 已接入，但当前仍是基础 OCR，不等于高精度公式识别系统
+- 文档解析层支持章节、表格、公式和图片抽取，但当前向量检索主链路仍以文本、表格、QA、KG 为主
+
+## 4. 后续维护建议
+
+如果后续实现再变化，建议优先更新顺序：
+
+1. `README.md`
 2. `docs/QUICKSTART.md`
-3. `docs/INTERVIEW_GUIDE.md`
-4. `ScholarAgent_完整项目文档.md`
+3. `ScholarAgent_完整项目文档.md`
+4. `docs/INTERVIEW_GUIDE.md`
+5. `docs/COMPLETE_PROJECT_DOCUMENTATION.md`

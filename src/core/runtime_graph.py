@@ -21,6 +21,7 @@ class RuntimeState(TypedDict, total=False):
     query: str
     intent: str
     slots: Dict[str, Any]
+    session_id: str
     trace_id: str
     task_config: TaskConfig | None
     history: List[Dict[str, str]]
@@ -54,6 +55,7 @@ class AgentRuntimeGraph:
         query: str,
         intent: str,
         slots: Dict[str, Any],
+        session_id: str,
         trace_id: str,
         task_config: TaskConfig,
         history: List[Dict[str, str]],
@@ -65,6 +67,7 @@ class AgentRuntimeGraph:
             "query": query,
             "intent": intent,
             "slots": slots,
+            "session_id": session_id,
             "trace_id": trace_id,
             "task_config": task_config,
             "history": history,
@@ -115,6 +118,7 @@ class AgentRuntimeGraph:
             intent=state["intent"],
             slots=state["slots"],
             mode=state["execution_mode"],
+            session_id=state.get("session_id", ""),
             trace_id=state["trace_id"],
             task_config=state.get("task_config"),
             history=state.get("history") or [],
@@ -195,6 +199,7 @@ class AgentRuntimeGraph:
             intent=state["intent"],
             slots=state["slots"],
             mode=state["execution_mode"],
+            session_id=state.get("session_id", ""),
             trace_id=state["trace_id"],
             task_config=state.get("task_config"),
             history=state.get("history") or [],

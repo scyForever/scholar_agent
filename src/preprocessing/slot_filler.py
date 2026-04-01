@@ -8,8 +8,21 @@ from config.intent_config import INTENT_SPECS
 
 class SlotFiller:
     YEAR_RANGE_PATTERN = re.compile(r"(20\d{2})\s*[-到至]\s*(20\d{2})")
-    RECENT_YEARS_PATTERN = re.compile(r"(近|最近)\s*(\d+)\s*年")
+    RECENT_YEARS_PATTERN = re.compile(r"(近|最近)\s*([一二两三四五六七八九十\d]+)\s*年")
     MAX_PAPERS_PATTERN = re.compile(r"(\d+)\s*(篇|papers?)")
+    CHINESE_NUMBERS = {
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "十": 10,
+    }
 
     def fill_slots_once(
         self,
@@ -57,7 +70,8 @@ class SlotFiller:
             return f"{match.group(1)}-{match.group(2)}"
         recent = self.RECENT_YEARS_PATTERN.search(query)
         if recent:
-            return f"last_{recent.group(2)}_years"
+            years = self._parse_year_count(recent.group(2))
+            return f"last_{years}_years" if years > 0 else ""
         return ""
 
     def _extract_max_papers(self, query: str) -> int:
@@ -78,9 +92,27 @@ class SlotFiller:
         if self.MAX_PAPERS_PATTERN.fullmatch(query.strip()):
             return ""
         cleaned = re.sub(r"请|帮我|想要|给我|搜索|检索|写一篇|生成|分析|解释|比较|介绍", "", query)
-        cleaned = cleaned.replace("相关论文", "").replace("论文", "").strip(" ：:，,。?？")
+        cleaned = self.YEAR_RANGE_PATTERN.sub("", cleaned)
+        cleaned = self.RECENT_YEARS_PATTERN.sub("", cleaned)
+        cleaned = re.sub(r"^(关于|有关)\s*", "", cleaned)
+        cleaned = cleaned.replace("相关论文", "").replace("论文", "")
+        cleaned = re.sub(r"\s*的$", "", cleaned).strip(" ：:，,。?？")
         if intent == "compare_methods":
             cleaned = re.split(r"和|与|vs|对比", cleaned)[0].strip()
         if not cleaned or re.fullmatch(r"[\d\s年月\-到至last_]+", cleaned, flags=re.IGNORECASE):
             return ""
         return cleaned
+
+    def _parse_year_count(self, value: str) -> int:
+        normalized = str(value or "").strip()
+        if normalized.isdigit():
+            return int(normalized)
+        if normalized == "十":
+            return 10
+        if normalized.startswith("十") and len(normalized) == 2:
+            return 10 + self.CHINESE_NUMBERS.get(normalized[1], 0)
+        if normalized.endswith("十") and len(normalized) == 2:
+            return self.CHINESE_NUMBERS.get(normalized[0], 0) * 10
+        if "十" in normalized and len(normalized) == 3:
+            return self.CHINESE_NUMBERS.get(normalized[0], 0) * 10 + self.CHINESE_NUMBERS.get(normalized[2], 0)
+        return self.CHINESE_NUMBERS.get(normalized, 0)

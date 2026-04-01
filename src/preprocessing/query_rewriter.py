@@ -40,6 +40,32 @@ REQUEST_SUFFIXES = (
 )
 
 CHINESE_RE = re.compile(r"[\u4e00-\u9fff]")
+TIME_RANGE_RE = re.compile(r"(近|最近)\s*[一二两三四五六七八九十\d]+\s*年|(20\d{2})\s*[-到至]\s*(20\d{2})")
+
+TERM_TRANSLATIONS = {
+    "多智能体强化学习": "multi-agent reinforcement learning",
+    "多智能体": "multi-agent",
+    "强化学习": "reinforcement learning",
+    "大模型": "large language model",
+    "大型语言模型": "large language model",
+    "语言模型": "language model",
+    "幻觉": "hallucination",
+    "检索增强生成": "retrieval augmented generation",
+    "图神经网络": "graph neural network",
+    "扩散模型": "diffusion model",
+    "分数匹配": "score matching",
+    "时间序列": "time series",
+    "推荐系统": "recommender system",
+    "知识图谱": "knowledge graph",
+    "因果推断": "causal inference",
+    "医学图像": "medical imaging",
+    "视觉语言模型": "vision-language model",
+    "机器人": "robotics",
+    "遥感": "remote sensing",
+    "综述": "survey",
+    "研究现状": "research progress",
+    "方法对比": "method comparison",
+}
 
 _DEFAULT_LLM_MANAGER: Optional[LLMManager] = None
 
@@ -88,8 +114,10 @@ class QueryRewriter:
         for suffix in REQUEST_SUFFIXES:
             if cleaned.endswith(suffix):
                 cleaned = cleaned[: -len(suffix)].strip()
-        cleaned = re.sub(r"^(关于|有关)\s*", "", cleaned)
+        cleaned = TIME_RANGE_RE.sub("", cleaned).strip()
+        cleaned = re.sub(r"^(关于|有关)\s*", "", cleaned).strip()
         cleaned = re.sub(r"\s*(方面|领域|方向)$", "", cleaned)
+        cleaned = re.sub(r"\s*的$", "", cleaned)
         cleaned = re.sub(
             r"\s*的(综述|研究现状|现状|最新进展|进展|方法对比|比较|对比|文章|论文|研究)$",
             "",
@@ -121,8 +149,8 @@ class QueryRewriter:
             self._rewrite_cache[cache_key] = plan
             return plan
 
-        if not self._has_real_provider():
-            plan = self._identity_plan(normalized_query)
+        if not self._has_verified_provider():
+            plan = self._heuristic_plan(normalized_query)
             self._rewrite_cache[cache_key] = plan
             return plan
 
@@ -139,23 +167,98 @@ class QueryRewriter:
 
     def _identity_plan(self, query: str) -> QueryRewritePlan:
         core_topic = self.extract_core_topic(query)
-        external_queries = self._clean_queries([core_topic, query], limit=6)
+        english_query = self._heuristic_translate(core_topic) or core_topic
+        external_queries = self._external_query_candidates(
+            english_query=english_query,
+            core_topic=core_topic,
+            original_query=query,
+        )
         local_queries = self._clean_queries([core_topic, query], limit=8)
         return QueryRewritePlan(
             core_topic=core_topic,
-            english_query=core_topic,
+            english_query=english_query,
             external_queries=external_queries or [query],
             local_queries=local_queries or [query],
         )
 
-    def _has_real_provider(self) -> bool:
-        return any(name != "mock" for name in self.llm.providers)
+    def _heuristic_plan(self, query: str) -> QueryRewritePlan:
+        core_topic = self.extract_core_topic(query)
+        english_query = self._heuristic_translate(core_topic) or core_topic
+        external_queries = self._external_query_candidates(
+            english_query=english_query,
+            core_topic=core_topic,
+            original_query=query,
+            extras=[
+                self._survey_variant(english_query, query),
+                self._comparison_variant(english_query, query),
+            ],
+        )
+        local_queries = self._clean_queries(
+            [
+                core_topic,
+                english_query,
+                query,
+                self._survey_variant(core_topic, query),
+                self._comparison_variant(core_topic, query),
+            ],
+            limit=8,
+        )
+        return QueryRewritePlan(
+            core_topic=core_topic or query,
+            english_query=english_query or core_topic or query,
+            external_queries=external_queries or [english_query or query],
+            local_queries=local_queries or [core_topic or query],
+        )
+
+    def _external_query_candidates(
+        self,
+        *,
+        english_query: str,
+        core_topic: str,
+        original_query: str,
+        extras: List[str] | None = None,
+    ) -> List[str]:
+        candidates: List[str] = [english_query]
+        candidates.extend(extras or [])
+        if core_topic and not CHINESE_RE.search(english_query):
+            candidates.append(core_topic if not CHINESE_RE.search(core_topic) else "")
+        if original_query and not CHINESE_RE.search(original_query):
+            candidates.append(original_query)
+        return self._clean_queries(candidates, limit=6)
+
+    def _has_verified_provider(self) -> bool:
+        return self.llm.has_verified_provider()
 
     def _is_plain_english_query(self, query: str) -> bool:
         if CHINESE_RE.search(query):
             return False
         lowered = query.lower()
         return not any(lowered.startswith(prefix) for prefix in REQUEST_PREFIXES)
+
+    def _heuristic_translate(self, topic: str) -> str:
+        translated = topic
+        for source, target in sorted(TERM_TRANSLATIONS.items(), key=lambda item: len(item[0]), reverse=True):
+            translated = translated.replace(source, target)
+        translated = re.sub(r"[，。；：、（）【】《》]", " ", translated)
+        translated = re.sub(r"\b关于\b|\b有关\b|\b论文\b|\b文献\b", " ", translated)
+        translated = _normalize_spaces(translated)
+        if CHINESE_RE.search(translated):
+            return topic
+        return translated
+
+    def _survey_variant(self, base: str, original_query: str) -> str:
+        lowered = original_query.lower()
+        if "综述" in original_query or "survey" in lowered:
+            return f"{base} survey"
+        if "进展" in original_query or "现状" in original_query:
+            return f"recent advances in {base}"
+        return ""
+
+    def _comparison_variant(self, base: str, original_query: str) -> str:
+        lowered = original_query.lower()
+        if any(token in original_query for token in ("对比", "比较")) or "compare" in lowered:
+            return f"{base} comparison"
+        return ""
 
     def _rewrite_prompt(self, query: str, intent: str) -> str:
         return (

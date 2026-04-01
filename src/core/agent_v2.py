@@ -18,6 +18,7 @@ from src.prompt_templates.manager import PromptTemplateManager
 from src.quality.enhancer import QualityEnhancer
 from src.rag.retriever import HybridRetriever
 from src.reasoning.engine import ReasoningEngine
+from src.skills import ResearchSkillset
 from src.whitelist.manager import WhitelistManager
 from src.whitebox.tracer import WhiteboxTracer
 
@@ -50,6 +51,7 @@ class AgentV2:
             reasoning=self.reasoning,
             templates=self.templates,
             tracer=self.tracer,
+            memory_manager=self.memory,
         )
         self.runtime_graph = AgentRuntimeGraph(
             multi_agent=self.multi_agent,
@@ -57,6 +59,7 @@ class AgentV2:
             quality=self.quality,
             tracer=self.tracer,
         )
+        self.research_skills = ResearchSkillset(self.memory)
         self.execution_mode = ExecutionMode.STANDARD
         self.enable_quality_enhance = False
 
@@ -146,6 +149,7 @@ class AgentV2:
                 query=query,
                 intent=intent,
                 slots=slots,
+                session_id=session_id,
                 trace_id=trace_id,
                 task_config=config,
                 history=self.dialogue.get_state(session_id).history,
@@ -194,6 +198,25 @@ class AgentV2:
 
     def submit_feedback(self, session_id: str, query: str, response: str, rating: int, comment: str = "") -> None:
         self.feedback.record_feedback(session_id, query, response, rating, comment)
+
+    def plan_research(self, topic: str, *, intent: str = "generate_survey", slots: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return asdict(self.research_skills.planning.plan(topic, intent=intent, slots=slots))
+
+    def fetch_paper(self, identifier: str, *, identifier_type: str = "auto", prefer: str = "pdf", download_dir: str = "") -> Dict[str, Any]:
+        return asdict(
+            self.research_skills.reading.fetch_full_text(
+                identifier,
+                identifier_type=identifier_type,
+                prefer=prefer,
+                download_dir=download_dir,
+            )
+        )
+
+    def read_paper(self, pdf_path: str, *, target_section: str = "") -> Dict[str, Any]:
+        return asdict(self.research_skills.reading.parse_pdf(pdf_path, target_section=target_section))
+
+    def extract_paper_visuals(self, pdf_path: str, *, page_numbers: list[int] | None = None, output_dir: str = "") -> Dict[str, Any]:
+        return self.research_skills.reading.extract_visuals(pdf_path, page_numbers=page_numbers, output_dir=output_dir)
 
     def get_status(self) -> Dict[str, Any]:
         return {

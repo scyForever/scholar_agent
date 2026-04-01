@@ -1,79 +1,89 @@
 # ScholarAgent
 
-ScholarAgent 是一个面向学术研究场景的多智能体助手，支持多源论文检索、论文分析、综述生成、代码生成、长期记忆和白盒追踪，并提供 Gradio Web 界面与 CLI 两种使用方式。
+ScholarAgent 是一个面向学术研究场景的多智能体助手。当前版本已经把 `tools -> skills -> agents -> runtime` 这条链路打通，支持多源学术检索、论文获取、PDF 精读、本地 RAG、研究规划、研究记忆和可观测执行追踪，并同时提供 Web 界面与 CLI 入口。
 
-## 当前能力
+## 1. 当前能力
 
-- 多源学术检索：`arXiv`、`OpenAlex`、`Semantic Scholar`、`Web of Science Starter API`
-- LLM 驱动查询改写：中文、英文、缩写和中英混合主题会先重写成结构化检索查询
-- Multi-Agent 协作：`Search / Analyze / Debate / Write / Coder`
-- Agent 框架：`LangChain` 统一模型适配，`LangGraph` 编排主执行链与多代理工作流
-- 结构化输出：`IntentClassifier`、`QueryRewriter` 基于 `LangChain structured output`
-- 工具抽象：搜索工具同时注册为项目工具和 `LangChain tools`
-- 搜索编排：搜索节点优先通过 `LangChain agent` 模型驱动选择检索工具，失败时回退到确定性策略
-- 搜索工具规划：运行时固定由 `zhipu` 执行 `LangChain agent` 检索规划；若 `zhipu` 不可用则回退到确定性检索
-- 搜索结果结构化落盘：搜索 agent 会额外输出结构化的工具选择理由、执行计划和聚合结果摘要
-- 多执行模式：快速模式、标准模式、完整模式
-- 推理引擎：支持 `Direct / CoT / ReAct / ToT / Debate / Reflection / CoVe` 七种模式，其中 `ReAct` 为真实工具循环，`ToT` 为显式树搜索，`Debate` 为多代理对辩
-- RAG 检索链路：对话增强、查询改写、路由、词法检索 + `BGE-M3` 向量检索、`RRF` 融合、`BGE-Reranker` 重排、相关性验证
-- 长期记忆：`SQLite` 持久化会话记忆
-- 白盒追踪：保存完整 trace，并在前端右侧实时展示执行时间线
-- 模型调用可视化：前端可看到每次 LLM 调用的用途、provider、model、耗时和失败信息
-- 阶段模型展示：执行时间线中的 `analyze / reasoning / debate / write` 卡片会内联显示实际命中的 `provider / model`
-- 对话恢复：主题切换、浏览器后退和页面刷新后会恢复最近的聊天记录
-- PDF 建库：上传 PDF 后建立本地知识库，写入 `SQLite + ChromaDB`，参与后续问答和综述生成
+- 多源学术检索：支持 `arXiv`、`OpenAlex`、`Semantic Scholar`、`Web of Science Starter API`、`PubMed`、`IEEE Xplore`、`Google Scholar` 的统一检索与聚合。
+- 论文获取：支持按 `DOI`、`arXiv ID`、`PMID`、`PMCID` 获取论文 PDF 或 HTML。
+- PDF 解析：支持正文抽取、章节识别、双栏版面感知、表格抽取、公式行提取和定向章节阅读。
+- OCR 与视觉提取：支持论文图片导出、基础 OCR、公式/表格候选内容提取，并输出 LaTeX 或 Markdown 近似表示。
+- 本地 RAG：支持 PDF 建库到 `SQLite + Chroma`，检索链路为“对话增强 -> 查询改写 -> 路由 -> 词法召回 + 稠密召回 -> RRF 融合 -> BGE 重排 -> 相关性校验 -> 补充检索”。
+- 多智能体协作：主链路包含 `search / analyze / debate / write / coder`，并补充 `research planner / research search / research reading / research memory`。
+- 研究规划：可把“大主题”拆解为检索、筛选、精读、综合、成文等多阶段任务。
+- 持久记忆：可记住用户偏好、读过的论文与研究笔记，降低重复推荐。
+- 可观测性：每次对话都会记录 trace，前端可查看执行时间线、阶段摘要和模型调用信息。
 
-## 近期更新
+## 2. 当前架构
 
-- 新增 `SCNet` provider，并统一兼容 OpenAI Chat Completions 风格 endpoint
-- `Web of Science Starter API` 已接入统一搜索链路
-- 查询重写从静态术语映射改为 `LLM` 结构化重写，输出 `english_query / external_queries / local_queries`
-- 任务规划器的 `reasoning_modes / enable_multi_agent / max_llm_calls` 已接入运行时执行，不再只是 trace 字段
-- Web 前端新增右侧实时执行时间线，`llm` 步骤会显示用途和实际命中的 `provider / model`
-- 前端会把同一次 `llm started / completed` 合并成一张卡片展示，时间线区域支持滚动
-- `analyze / reasoning / debate / write` 会在执行时间线阶段卡片中内联展示实际模型，不再单独显示独立模型面板
-- 前端新增浏览器侧历史持久化，主题切换、返回上页和刷新后可恢复对话记录
-- `MemoryManager` 与 `HybridRetriever` 改为按次创建 SQLite 连接，兼容 Gradio worker thread
-- trace 写盘前会自动确保 [logs/traces](logs/traces) 目录存在
-- 长文写作与质量增强使用单独的长输出 token 配置，减少综述中途截断
-- 本地 RAG 已固定为 `BGE-M3 + ChromaDB + BGE-Reranker`，并提供 [rebuild_chroma_index.py](rebuild_chroma_index.py) 从 `rag_index.db` 一键重建向量索引
-- `ReAct` 已改成真实工具循环，可调用本地 RAG 与白名单工具
-- `ToT` 已改成显式分支扩展、打分与 beam 剪枝
-- `Debate` 已改成正方、反方、复辩、主持四轮多代理对辩
-- 搜索工具规划阶段现已固定使用 `zhipu`；`zhipu` 不可用时自动退回确定性检索
+当前实现按四层组织：
 
-## 快速开始
+1. `tools`
+   负责外部能力接入，例如学术搜索、论文获取、PDF 解析、OCR、网页补充检索。
+2. `skills`
+   负责把原子工具组合成研究动作，例如文献搜索、深度阅读、研究规划、研究记忆。
+3. `agents`
+   负责按角色编排执行，例如 `SearchAgent`、`AnalyzeAgent`、`ResearchReadingAgent`。
+4. `runtime`
+   由 `AgentV2 + RuntimeGraph + MultiAgentCoordinator` 统一调度意图识别、任务规划、RAG、写作与质量增强。
 
-### 方式一：使用现有 conda 环境
+高层入口如下：
+
+- 对话主入口：`src/core/agent_v2.py`
+- 运行图：`src/core/runtime_graph.py`
+- 多代理编排：`src/agents/multi_agent.py`
+- 研究层技能：`src/skills/research_skills.py`
+- 学术搜索工具：`src/tools/research_search_tool.py`
+- 文档获取与解析工具：`src/tools/research_document_tool.py`
+- 本地 RAG：`src/rag/retriever.py`
+
+## 3. 快速开始
+
+### 3.1 环境准备
+
+推荐直接使用现有 `conda` 环境：
 
 ```bash
 source /home/a1/miniconda3/etc/profile.d/conda.sh
 conda activate agent
-python run.py
+pip install -r requirements.txt
 ```
 
-### 方式二：新建虚拟环境
+如果要新建虚拟环境：
 
 ```bash
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-python run.py
 ```
 
-启动后可选择：
+### 3.2 OCR 依赖
 
-- `1` Web 界面
-- `2` 命令行
-- `3` 功能验证
+项目的 OCR 依赖分两部分：
 
-## 配置
+- Python 包：`pytesseract`
+- 系统可执行文件：`tesseract`
 
-### LLM API Key
+要求：
 
-项目支持多家兼容 OpenAI Chat Completions 的 provider，底层通过 `LangChain ChatOpenAI` 统一适配。你可以通过环境变量或直接修改 [api_keys.py](api_keys.py) 提供密钥。
+- `pip install -r requirements.txt` 会安装 `pytesseract`
+- 还需要本机存在 `tesseract` 命令
 
-常用键包括：
+检查方式：
+
+```bash
+tesseract --version
+```
+
+如果你使用 conda，可参考：
+
+```bash
+conda install -c conda-forge tesseract
+```
+
+### 3.3 最小配置
+
+项目在没有真实 LLM provider 时也能运行，但会退化为本地规则/启发式链路。建议至少配置一组真实 provider：
 
 - `SCNET_API_KEY`
 - `SILICONFLOW_API_KEY`
@@ -81,205 +91,161 @@ python run.py
 - `DEEPSEEK_API_KEY`
 - `DASHSCOPE_API_KEY`
 
-### Web of Science
+学术源相关可选配置：
 
-如果要启用 `Web of Science Starter API`，需要配置：
+- `WOS_STARTER_API_KEY`
+- `IEEE_XPLORE_API_KEY`
+- `SERPAPI_API_KEY`
+- `NCBI_API_KEY`
 
-```bash
-export WOS_STARTER_API_KEY="your-key"
-```
-
-可选配置：
-
-```bash
-export WOS_DOCUMENTS_URL="https://api.clarivate.com/apis/wos-starter/v1/documents"
-export WOS_DATABASE="WOS"
-```
-
-对应设置位于 [settings.py](config/settings.py)。
-
-### 本地 RAG 模型与向量库
-
-默认配置位于 [settings.py](config/settings.py)，常用项包括：
+本地 RAG 模型相关配置：
 
 ```bash
-export BGE_M3_MODEL_PATH="/你的本地/BAAI/bge-m3"
+export BGE_M3_MODEL_PATH="/你的本地/bge-m3"
 export BGE_RERANKER_MODEL_PATH="/你的本地/bge-reranker-v2-m3"
 export RAG_VECTOR_COLLECTION="rag_chunks"
+export RAG_PARALLEL_WORKERS="8"
 ```
 
-如果你更换了本地 embedding / reranker 模型，或者切换了向量库存储目录，建议重建索引：
+### 3.4 启动项目
 
 ```bash
-source /home/a1/miniconda3/etc/profile.d/conda.sh
-conda activate agent
-python rebuild_chroma_index.py
+python run.py
 ```
 
-## 使用示例
+启动后可选择：
 
-### 论文检索
+1. Web 界面
+2. 命令行
+3. 功能验证
+
+## 4. 验证命令
+
+基础回归：
+
+```bash
+python verify_features.py
+```
+
+这个脚本会检查：
+
+- Prompt/Trace/Memory 基础模块
+- `AgentV2` 核心入口
+- 研究规划接口
+- 论文获取接口
+- 统一工具注册与白名单
+
+搜索 agent 路径验证：
+
+```bash
+python verify_agentic_search.py
+```
+
+这个脚本用于验证：
+
+- 查询改写是否正常
+- 外部学术搜索工具能否返回结果
+- `LangChain agent` 搜索规划是否命中
+
+说明：
+
+- 该脚本依赖至少一个真实可用的 provider
+- 搜索规划当前优先尝试 `zhipu`
+- 若没有已验证成功的规划 provider，运行时会自动降级为确定性搜索，不会阻塞整条链路
+
+## 5. 使用示例
+
+### 5.1 命令行问答
 
 ```text
 搜索近三年关于多智能体强化学习的论文
 ```
 
-### 综述生成
+```text
+写一篇关于大模型幻觉的综述
+```
 
 ```text
-写一篇 SERF 效应的综述
+总结这篇论文的方法、实验设计和局限
 ```
 
-### 概念解释
+### 5.2 代码方式调用
 
-```text
-解释一下 diffusion model 和 score matching 的关系
+```python
+from src.core.agent_v2 import AgentV2
+
+agent = AgentV2()
+
+plan = agent.plan_research(
+    "写一篇关于大模型幻觉的综述",
+    slots={"time_range": "2023-2024"},
+)
+
+asset = agent.fetch_paper("2401.14805", identifier_type="arxiv", prefer="pdf")
+
+document = agent.read_paper(asset["local_path"], target_section="method")
+
+response = agent.chat("搜索近三年关于多智能体强化学习的论文", session_id="demo")
+print(response.answer)
 ```
 
-### 本地 PDF 建库
+## 6. 本地 RAG 完整流程
 
-在 Web 界面上传 PDF 后，再提问：
+### 6.1 建库流程
 
-```text
-总结这篇论文的方法、实验设置和局限
-```
+1. `AgentV2.index_pdf()` 调用 `HybridRetriever.index_pdf()`
+2. `pdf_tool.extract_pdf_text()` 调用 `research_document_tool` 解析 PDF
+3. 提取正文块、表格块、QA 块、知识关系块
+4. 写入 `data/memory/rag_index.db`
+5. 同步写入 `data/vector_db/<collection>`
 
-## 执行模式
+### 6.2 检索流程
 
-- 快速模式：走该意图的最小完整链路
-- 标准模式：走该意图的完整基础 flow
-- 完整模式：在基础 flow 结束后叠加 `Self-MoA + MPSC`
+1. `chat()` 先执行记忆召回、意图识别、槽位填充、任务规划
+2. `SearchAgent` 先查本地 RAG
+3. 检索器执行对话增强、查询改写和路由
+4. 按 `text_chunk / table_chunk / qa_chunk / kg_chunk` 并行检索
+5. 词法侧使用 `TF-IDF + BM25`，向量侧使用 `BGE-M3 + Chroma`
+6. 结果经 `RRF` 融合后再由 `bge-reranker-v2-m3` 重排
+7. 通过相关性判断做 CRAG 风格校验
+8. 若本地结果不足，再补外部网页或学术搜索结果
 
-说明：
+### 6.3 写作流程
 
-- 只有在未开启快速模式时，`质量增强` 才会实际进入完整模式。
-- [AgentV2.set_mode](src/core/agent_v2.py) 决定的是用户请求的执行模式上限。
-- 规划器现在会继续影响实际执行：
-  - `enable_multi_agent=False` 时，`STANDARD / FULL` 的基础 flow 会自动收缩到 `intent_flows_fast`
-  - `reasoning_modes` 会真实约束推理模式选择
-  - `max_llm_calls` 会真实限制执行阶段高层 LLM 调用数
-- `max_llm_calls` 目前只统计执行阶段高层调用，不包含意图识别、查询改写、RAG 相关性判断。
+写作阶段会同时消费：
 
-常见 flow 示例：
+- 本地 RAG 命中的片段
+- 外部学术搜索结果
+- 论文分析结果
+- 研究计划
+- 历史记忆
 
-- `search_papers`：`search -> write`
-- `analyze_paper`：`search -> analyze -> write`
-- `generate_survey`：快速模式 `search -> analyze -> write`，标准/完整模式 `search -> analyze -> debate -> write`
+最终由 `write` 节点生成回答；如果是 `FULL` 模式，还会再做一轮质量增强。
 
-当前几种关键推理模式的真实行为：
+## 7. 数据落盘
 
-- `react`：先让模型输出下一步 JSON 决策，再真实调用工具，再基于观察继续推理
-- `tot`：显式扩展多个候选分支，逐层打分与剪枝，最后基于最佳路径综合输出
-- `debate`：按“正方立论 -> 反方质询 -> 正方复辩 -> 主持裁决”执行多轮对辩
-- `reflection`：先产出初稿，再做一次审阅与修订
-- `cove`：先回答，再提出验证问题并修订
+- Trace：`logs/traces/`
+- 长期记忆：`data/memory/memory.db`
+- 本地 RAG 元数据：`data/memory/rag_index.db`
+- 本地向量库：`data/vector_db/`
+- 白名单：`data/whitelist.json`
+- 反馈：`data/feedback/feedback.jsonl`
+- 下载论文与中间文件：`cache/`
 
-## 前端可视化
+## 8. 当前边界
 
-Web 界面右侧提供三层可观测性：
+- 外部搜索得到的新论文不会自动写回本地 RAG，当前仍然是“外部检索”和“本地知识库”分层。
+- 搜索规划不是始终强依赖远程模型。系统会优先尝试已验证成功的 provider；若不可用，则退回确定性搜索。
+- 当前搜索规划阶段只把 `zhipu` 视为 agentic planning provider；未验证成功时直接退回确定性策略。
+- OCR 已可用，但当前还是 `tesseract + pytesseract` 的基础能力，对复杂公式、扫描件和高密度图表的精度有限。
+- `Google Scholar` 和 `IEEE Xplore` 依赖外部 key 与接口可用性，可能返回空结果。
+- 没有真实 provider 时，项目仍可运行，但意图识别、查询改写、分析写作的效果会明显下降。
 
-- 执行时间线：实时滚动显示 `memory_recall / intent / slots / planning / search / llm / analyze / debate / write / quality`
-- 步骤详情：查看任一步的 `input / output / metadata`
-- 原始 Trace JSON：完整保留落盘 trace
+## 9. 文档索引
 
-其中 `llm` 步骤会展示：
-
-- 本次调用用途，例如 `查询改写`、`论文分析`、`综述写作`
-- 实际命中的 `provider / model`
-- 调用耗时
-- 失败信息
-
-另外，业务阶段卡片也会补充模型摘要：
-
-- `analyze / reasoning / debate / write` 卡片会直接显示这一阶段使用了什么模型
-- 若阶段触发但没有实际调用模型，会显示 `未调用 LLM`
-- 前端使用浏览器本地状态恢复最近历史，因此改主题、后退或刷新后通常仍能看到最近对话
-
-Trace 默认写入 [logs/traces](logs/traces)。
-
-## 数据落盘
-
-- 对话 trace： [logs/traces](logs/traces)
-- 长期记忆库： [data/memory/memory.db](data/memory/memory.db)
-- 本地向量库： [data/vector_db](data/vector_db)
-- 用户反馈： [data/feedback/feedback.jsonl](data/feedback/feedback.jsonl)
-
-其中：
-
-- trace 保存完整执行步骤、最终输出和模型调用信息
-- `memory.db` 保存会话级记忆条目
-- `data/vector_db` 保存 `ChromaDB` 向量索引
-- `feedback.jsonl` 只在显式提交反馈时写入
-- 外部搜索得到的论文结果不会自动写入本地 RAG；当前只有上传 PDF 或显式建库才会进入向量库
-
-## Provider 诊断
-
-项目根目录提供了 [test_provider_access.py](test_provider_access.py)，可直接诊断某个 provider 的请求链路：
-
-```bash
-source /home/a1/miniconda3/etc/profile.d/conda.sh
-conda activate agent
-python test_provider_access.py --provider scnet
-```
-
-它会打印实际请求 URL、代理环境变量、HTTP 状态码和原始响应，适合排查 `SCNet` 或其他 provider 的连通性问题。
-
-如果你要验证真实 provider 下的 `LangChain agent` 搜索路径，以及 `agent_selected_tools / agent_final_output` 是否正确产出，可执行：
-
-```bash
-source /home/a1/miniconda3/etc/profile.d/conda.sh
-conda activate agent
-python verify_agentic_search.py
-```
-
-脚本会先预检至少一个真实 provider，再直接执行搜索节点，并打印：
-
-- `tool_strategy`
-- `agent_selected_tools`
-- `agent_tool_calls`
-- `agent_output_source`
-- `agent_final_output`
-- `agent_provider_attempts`
-
-说明：
-
-- 当前运行时的“搜索工具规划”固定使用 `zhipu`
-- 若 `zhipu` 不可用，搜索节点会自动退回确定性检索，不会继续在其他 provider 上轮询规划
-
-## 索引维护
-
-如果本地 RAG 的 `SQLite chunk` 与 `ChromaDB` 向量库不一致，或你删除/更换了本地模型文件，建议直接重建索引：
-
-```bash
-source /home/a1/miniconda3/etc/profile.d/conda.sh
-conda activate agent
-python rebuild_chroma_index.py
-```
-
-如果你只想从头重建本地文档库，也可以清理：
-
-- [data/memory/rag_index.db](data/memory/rag_index.db)
-- [data/vector_db](data/vector_db)
-
-## 核心模块
-
-- [AgentV2](src/core/agent_v2.py)：总控入口，串联意图识别、槽位填充、任务规划、LangGraph 运行时执行、记忆与 trace
-- [LLMManager](src/core/llm.py)：基于 LangChain 的 provider 管理、重试、故障转移、模型调用 trace
-- [QueryRewriter](src/preprocessing/query_rewriter.py)：基于 LangChain structured output 的查询改写
-- [IntentClassifier](src/preprocessing/intent_classifier.py)：基于 LangChain structured output 的意图识别
-- [MultiAgentCoordinator](src/agents/multi_agent.py)：基于 LangGraph 的 Search / Analyze / Debate / Write / Coder 协作
-- [ToolRegistry](src/tools/registry.py)：统一维护项目工具与 LangChain tools 双注册
-- [HybridRetriever](src/rag/retriever.py)：本地 RAG 检索
-- [WhiteboxTracer](src/whitebox/tracer.py)：trace 持久化
-- [Gradio UI](src/ui/gradio_app.py)：实时执行时间线与步骤详情展示
-
-## 相关文档
-
-- 完整项目文档：[ScholarAgent_完整项目文档.md](ScholarAgent_完整项目文档.md)
-- RAG 流程图：[RAG_v3_完整流程图.html](RAG_v3_完整流程图.html)
-
-## 说明
-
-- 当前 Web 前端是“步骤级实时刷新”，不是 token 级流式输出正文。
-- 无真实 LLM provider 可用时，系统仍可运行，但查询改写和高质量生成能力会明显下降。
-- `Web of Science` 真实可用性取决于 `WOS_STARTER_API_KEY` 与网络环境。
+- 快速开始：`docs/QUICKSTART.md`
+- 文档总览：`docs/PROJECT_DOCUMENTATION.md`
+- 完整项目文档：`ScholarAgent_完整项目文档.md`
+- 面试速记版：`docs/INTERVIEW_GUIDE.md`
+- 完整文档入口：`docs/COMPLETE_PROJECT_DOCUMENTATION.md`
+- RAG 可视化流程图：`RAG_v3_完整流程图.html`

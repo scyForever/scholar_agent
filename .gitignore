@@ -212,3 +212,4 @@ cache/
 data/memory/
 data/vector_db/
 .codex
+api_keys.py

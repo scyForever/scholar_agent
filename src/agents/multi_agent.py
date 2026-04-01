@@ -6,14 +6,29 @@ import json
 from typing import Any, Dict, List, TypedDict
 
 from config.settings import settings
+from src.agents.research_agents import (
+    ResearchMemoryAgent,
+    ResearchPlannerAgent,
+    ResearchReadingAgent,
+    ResearchSearchAgent,
+)
 from src.core.llm import LLMManager
-from src.core.models import DebateResult, ExecutionMode, Paper, PaperAnalysis, SearchResult
+from src.core.models import (
+    DebateResult,
+    ExecutionMode,
+    Paper,
+    PaperAnalysis,
+    ResearchPlan,
+    SearchResult,
+)
+from src.memory.manager import MemoryManager
 from src.core.structured_outputs import SearchAgentExecutionStep, SearchAgentFinalOutput
 from src.planning.task_hierarchy import TaskConfig
 from src.preprocessing.query_rewriter import QueryRewriter
 from src.prompt_templates.manager import PromptTemplateManager
 from src.rag.retriever import HybridRetriever
 from src.reasoning.engine import ReasoningEngine
+from src.skills import ResearchSkillset
 from src.tools import TOOL_REGISTRY
 from src.whitelist.manager import WhitelistManager
 from src.whitebox.tracer import WhiteboxTracer
@@ -39,10 +54,12 @@ class MultiAgentState(TypedDict, total=False):
     intent: str
     slots: Dict[str, Any]
     mode: ExecutionMode
+    session_id: str
     trace_id: str
     task_config: TaskConfig | None
     history: List[Dict[str, str]]
     flow: List[str]
+    research_plan: ResearchPlan | None
     search_result: SearchResult | None
     analyses: List[PaperAnalysis]
     debate: DebateResult | None
@@ -51,12 +68,19 @@ class MultiAgentState(TypedDict, total=False):
 
 
 class SearchAgent:
-    def __init__(self, retriever: HybridRetriever, whitelist: WhitelistManager, tracer: WhiteboxTracer) -> None:
+    def __init__(
+        self,
+        retriever: HybridRetriever,
+        whitelist: WhitelistManager,
+        tracer: WhiteboxTracer,
+        research_search_agent: ResearchSearchAgent | None = None,
+    ) -> None:
         self.retriever = retriever
         self.llm = retriever.llm
         self.whitelist = whitelist
         self.tracer = tracer
         self.rewriter = QueryRewriter(retriever.llm)
+        self.research_search_agent = research_search_agent
 
     def run(
         self,
@@ -65,6 +89,7 @@ class SearchAgent:
         slots: Dict[str, Any],
         history: List[Dict[str, str]],
         trace_id: str,
+        session_id: str = "",
     ) -> SearchResult:
         topic = str(slots.get("topic") or slots.get("paper_title") or query)
         time_range = str(slots.get("time_range") or "")
@@ -91,15 +116,22 @@ class SearchAgent:
             return result
 
         allowed_tool_names = [
-            tool for tool in self.whitelist.allowed_tools("search_agent") if tool != "search_web"
+            tool
+            for tool in self.whitelist.allowed_tools("search_agent")
+            if tool != "search_web"
         ]
+        prioritized_tool_names = self._prioritize_search_tools(
+            topic=topic,
+            intent=intent,
+            allowed_tool_names=allowed_tool_names,
+        )
         search_payload = self._run_external_search(
             topic=topic,
             intent=intent,
             time_range=time_range,
             max_results=max_results,
             rewritten_queries=rewritten_queries,
-            allowed_tool_names=allowed_tool_names,
+            allowed_tool_names=prioritized_tool_names,
         )
         aggregated = search_payload["aggregated"]
 
@@ -108,6 +140,26 @@ class SearchAgent:
             key=lambda item: (item.score, item.citations, item.year or 0),
             reverse=True,
         )[:max_results]
+        memory_trace: Dict[str, Any] = {}
+        if session_id and self.research_search_agent is not None:
+            ranked = self.research_search_agent.skills.memory.rank_unseen_first(
+                session_id,
+                papers,
+                limit=max_results,
+            )
+            papers = list(ranked["papers"])
+            memory_trace = {
+                "seen_count": ranked["seen_count"],
+                "unseen_count": ranked["unseen_count"],
+                "seen_titles": ranked["seen_titles"],
+            }
+            self.research_search_agent.skills.memory.remember_search_preferences(
+                session_id,
+                topic=topic,
+                time_range=time_range,
+                sources=search_payload["selected_tools"],
+                max_results=max_results,
+            )
         source_breakdown: Dict[str, int] = defaultdict(int)
         for paper in papers:
             source_breakdown[paper.source] += 1
@@ -128,6 +180,7 @@ class SearchAgent:
                 "agent_output_source": search_payload["final_output_source"],
                 "agent_provider_attempts": search_payload["provider_attempts"],
                 "agent_errors": search_payload["agent_errors"],
+                "memory_ranking": memory_trace,
             },
         )
         self.tracer.trace_step(trace_id, "search", {"query": topic}, asdict(result))
@@ -157,7 +210,11 @@ class SearchAgent:
         elif not planning_provider_names:
             fallback_errors.append("zhipu_unavailable_for_search_agent")
 
-        if not self._supports_agentic_search() or not allowed_tool_names or not planning_provider_names:
+        if (
+            not self._supports_agentic_search()
+            or not allowed_tool_names
+            or not planning_provider_names
+        ):
             fallback_result = self._deterministic_search(
                 rewritten_queries=rewritten_queries,
                 max_results=max_results,
@@ -228,7 +285,9 @@ class SearchAgent:
                     config={"recursion_limit": 6},
                     interrupt_after=["tools"],
                 )
-                payload = self._parse_agent_result(result, allowed_tool_names=allowed_tool_names)
+                payload = self._parse_agent_result(
+                    result, allowed_tool_names=allowed_tool_names
+                )
                 final_output, final_output_source = self._resolve_agent_final_output(
                     result=result,
                     provider_name=provider_name,
@@ -240,9 +299,14 @@ class SearchAgent:
                 )
                 payload["final_output"] = final_output.model_dump(mode="json")
                 payload["final_output_source"] = final_output_source
-                payload["agent_summary"] = final_output.aggregation.summary or payload["agent_summary"]
+                payload["agent_summary"] = (
+                    final_output.aggregation.summary or payload["agent_summary"]
+                )
                 for tool_name in final_output.selected_tools:
-                    if tool_name in allowed_tool_names and tool_name not in payload["selected_tools"]:
+                    if (
+                        tool_name in allowed_tool_names
+                        and tool_name not in payload["selected_tools"]
+                    ):
                         payload["selected_tools"].append(tool_name)
                 self.llm.record_provider_success(provider_name)
                 if payload["aggregated"]:
@@ -286,9 +350,10 @@ class SearchAgent:
         aggregated: Dict[str, Paper] = {}
         tool_calls: List[Dict[str, Any]] = []
         selected_tools: List[str] = []
+        candidate_queries = rewritten_queries[:2] if len(tool_names) >= 4 else rewritten_queries[:3]
         for tool_name in tool_names:
             used = False
-            for rewritten in rewritten_queries[:3]:
+            for rewritten in candidate_queries:
                 papers = self._invoke_search_tool(
                     tool_name,
                     query=rewritten,
@@ -335,30 +400,48 @@ class SearchAgent:
         try:
             if use_langchain:
                 tool = TOOL_REGISTRY.get_langchain_tool(tool_name)
-                return list(
-                    tool.invoke(
-                        {
-                            "query": query,
-                            "max_results": max_results,
-                            "time_range": time_range,
-                        }
-                    )
+                result = tool.invoke(
+                    {
+                        "query": query,
+                        "max_results": max_results,
+                        "time_range": time_range,
+                    }
                 )
-            return list(
-                TOOL_REGISTRY.call(
-                    tool_name,
-                    query=query,
-                    max_results=max_results,
-                    time_range=time_range,
-                )
+                return self._normalize_tool_papers(result)
+            result = TOOL_REGISTRY.call(
+                tool_name,
+                query=query,
+                max_results=max_results,
+                time_range=time_range,
             )
+            return self._normalize_tool_papers(result)
         except TypeError:
             if use_langchain:
                 tool = TOOL_REGISTRY.get_langchain_tool(tool_name)
-                return list(tool.invoke({"query": query, "max_results": max_results}))
-            return list(TOOL_REGISTRY.call(tool_name, query=query, max_results=max_results))
+                result = tool.invoke({"query": query, "max_results": max_results})
+                return self._normalize_tool_papers(result)
+            result = TOOL_REGISTRY.call(tool_name, query=query, max_results=max_results)
+            return self._normalize_tool_papers(result)
         except Exception:
             return []
+
+    def _normalize_tool_papers(self, result: Any) -> List[Paper]:
+        if isinstance(result, list):
+            items = result
+        elif isinstance(result, dict) and isinstance(result.get("papers"), list):
+            items = result.get("papers") or []
+        else:
+            return []
+        papers: List[Paper] = []
+        for item in items:
+            if isinstance(item, Paper):
+                papers.append(item)
+            elif isinstance(item, dict):
+                try:
+                    papers.append(self._paper_from_payload(item))
+                except Exception:
+                    continue
+        return papers
 
     def _merge_papers(self, aggregated: Dict[str, Paper], papers: List[Paper]) -> None:
         for paper in papers:
@@ -370,11 +453,44 @@ class SearchAgent:
                 aggregated[key] = paper
 
     def _supports_agentic_search(self) -> bool:
-        return create_agent is not None and StructuredTool is not None and bool(self.llm.get_healthy_provider_names())
+        return (
+            create_agent is not None
+            and StructuredTool is not None
+            and bool(self.llm.get_healthy_provider_names())
+        )
+
+    def _prioritize_search_tools(
+        self,
+        *,
+        topic: str,
+        intent: str,
+        allowed_tool_names: List[str],
+    ) -> List[str]:
+        if not allowed_tool_names:
+            return []
+        lowered = topic.lower()
+        if any(token in lowered for token in ("medical", "biomedical", "clinical", "drug", "patient", "蛋白", "医学", "生物")):
+            preferred = ["search_pubmed", "search_semantic_scholar", "search_openalex"]
+        elif any(token in lowered for token in ("wireless", "signal", "通信", "robot", "robotics", "control", "芯片", "电气")):
+            preferred = ["search_ieee_xplore", "search_openalex", "search_semantic_scholar"]
+        else:
+            preferred = ["search_arxiv", "search_openalex", "search_semantic_scholar"]
+        if intent in {"daily_update", "generate_survey"}:
+            preferred.append("search_web_of_science")
+        ordered = [name for name in preferred if name in allowed_tool_names]
+        ordered.extend(
+            name for name in allowed_tool_names if name not in ordered and name != "search_literature"
+        )
+        if "search_literature" in allowed_tool_names:
+            ordered.append("search_literature")
+        limit = 3 if len(ordered) >= 3 else len(ordered)
+        return ordered[:limit]
 
     def _search_planning_provider_names(self) -> List[str]:
         # 搜索工具规划阶段固定只使用 zhipu，避免在多个 provider 间轮询。
-        return [name for name in self.llm.get_healthy_provider_names() if name == "zhipu"]
+        return [
+            name for name in self.llm.get_verified_provider_names() if name == "zhipu"
+        ]
 
     def _build_agent_tools(self, tool_names: List[str]) -> List[Any]:
         agent_tools: List[Any] = []
@@ -423,7 +539,9 @@ class SearchAgent:
             return f"{tool_name} 未返回结果。"
         lines = [f"{tool_name} 返回 {len(papers)} 篇候选论文。"]
         for paper in papers[:3]:
-            lines.append(f"- {paper.title} ({paper.year or 'N/A'}) | {paper.source} | citations={paper.citations}")
+            lines.append(
+                f"- {paper.title} ({paper.year or 'N/A'}) | {paper.source} | citations={paper.citations}"
+            )
         return "\n".join(lines)
 
     def _search_agent_system_prompt(self) -> str:
@@ -448,7 +566,9 @@ class SearchAgent:
         max_results: int,
         rewritten_queries: List[str],
     ) -> str:
-        candidate_queries = "\n".join(f"- {query}" for query in rewritten_queries[:4]) or "- " + topic
+        candidate_queries = (
+            "\n".join(f"- {query}" for query in rewritten_queries[:4]) or "- " + topic
+        )
         return (
             f"任务意图：{intent}\n"
             f"核心主题：{topic}\n"
@@ -459,7 +579,9 @@ class SearchAgent:
             "请根据主题选择最合适的学术搜索工具并执行检索。若主题较广，可组合多个工具；若主题较窄，优先选择最匹配工具。"
         )
 
-    def _parse_agent_result(self, result: Dict[str, Any], *, allowed_tool_names: List[str]) -> Dict[str, Any]:
+    def _parse_agent_result(
+        self, result: Dict[str, Any], *, allowed_tool_names: List[str]
+    ) -> Dict[str, Any]:
         aggregated: Dict[str, Paper] = {}
         selected_tools: List[str] = []
         tool_calls: List[Dict[str, Any]] = []
@@ -470,7 +592,11 @@ class SearchAgent:
             if AIMessage is not None and isinstance(message, AIMessage):
                 for tool_call in getattr(message, "tool_calls", []) or []:
                     tool_name = str(tool_call.get("name") or "")
-                    if tool_name and tool_name in allowed_set and tool_name not in selected_tools:
+                    if (
+                        tool_name
+                        and tool_name in allowed_set
+                        and tool_name not in selected_tools
+                    ):
                         selected_tools.append(tool_name)
                 content = self._message_text(message)
                 if content:
@@ -480,7 +606,9 @@ class SearchAgent:
                 if not isinstance(artifact, dict):
                     continue
                 call_record = {
-                    "tool_name": str(artifact.get("tool_name") or getattr(message, "name", "") or ""),
+                    "tool_name": str(
+                        artifact.get("tool_name") or getattr(message, "name", "") or ""
+                    ),
                     "query": str(artifact.get("query") or ""),
                     "max_results": int(artifact.get("max_results") or 0),
                     "time_range": str(artifact.get("time_range") or ""),
@@ -513,7 +641,9 @@ class SearchAgent:
         allowed_tool_names: List[str],
     ) -> tuple[SearchAgentFinalOutput, str]:
         structured = result.get("structured_response")
-        validated = self._validate_agent_final_output(structured, allowed_tool_names=allowed_tool_names)
+        validated = self._validate_agent_final_output(
+            structured, allowed_tool_names=allowed_tool_names
+        )
         if validated is not None:
             return validated, "agent_response_format"
         try:
@@ -531,7 +661,9 @@ class SearchAgent:
                 purpose="搜索结果结构化总结",
                 budgeted=True,
             )
-            validated = self._validate_agent_final_output(followup, allowed_tool_names=allowed_tool_names)
+            validated = self._validate_agent_final_output(
+                followup, allowed_tool_names=allowed_tool_names
+            )
             if validated is not None:
                 return validated, "followup_structured_call"
         except Exception:
@@ -558,13 +690,17 @@ class SearchAgent:
             if isinstance(structured, SearchAgentFinalOutput):
                 output = structured
             elif hasattr(structured, "model_dump"):
-                output = SearchAgentFinalOutput.model_validate(structured.model_dump(mode="json"))
+                output = SearchAgentFinalOutput.model_validate(
+                    structured.model_dump(mode="json")
+                )
             else:
                 output = SearchAgentFinalOutput.model_validate(structured)
         except Exception:
             return None
         allowed_set = set(allowed_tool_names)
-        output.selected_tools = [name for name in output.selected_tools if name in allowed_set]
+        output.selected_tools = [
+            name for name in output.selected_tools if name in allowed_set
+        ]
         output.execution_plan = [
             step
             for step in output.execution_plan
@@ -639,7 +775,9 @@ class SearchAgent:
             f"{paper.title} ({paper.year or 'N/A'}, {paper.source}, citations={paper.citations})"
             for paper in ranked_papers[:5]
         ]
-        representative_titles = [paper.title for paper in ranked_papers[:8] if paper.title]
+        representative_titles = [
+            paper.title for paper in ranked_papers[:8] if paper.title
+        ]
         if ranked_papers:
             summary = (
                 f"{summary_reason} 共聚合 {len(ranked_papers)} 篇候选论文，"
@@ -658,7 +796,7 @@ class SearchAgent:
             },
         )
 
-    def _message_text(self, message: BaseMessage) -> str: # type: ignore
+    def _message_text(self, message: BaseMessage) -> str:  # type: ignore
         content = getattr(message, "content", "")
         if isinstance(content, str):
             return content.strip()
@@ -671,7 +809,9 @@ class SearchAgent:
                     text = item.get("text")
                     if isinstance(text, str):
                         parts.append(text)
-            return "\n".join(part.strip() for part in parts if str(part).strip()).strip()
+            return "\n".join(
+                part.strip() for part in parts if str(part).strip()
+            ).strip()
         return str(content or "").strip()
 
     def _paper_from_payload(self, payload: Dict[str, Any]) -> Paper:
@@ -680,7 +820,9 @@ class SearchAgent:
             title=str(payload.get("title") or ""),
             abstract=str(payload.get("abstract") or ""),
             authors=[str(item) for item in payload.get("authors") or []],
-            year=int(payload["year"]) if payload.get("year") not in (None, "") else None,
+            year=(
+                int(payload["year"]) if payload.get("year") not in (None, "") else None
+            ),
             venue=str(payload.get("venue") or ""),
             url=str(payload.get("url") or ""),
             pdf_url=str(payload.get("pdf_url") or ""),
@@ -694,43 +836,98 @@ class SearchAgent:
 
 
 class AnalyzeAgent:
-    def __init__(self, llm: LLMManager, templates: PromptTemplateManager, tracer: WhiteboxTracer) -> None:
+    def __init__(
+        self,
+        llm: LLMManager,
+        templates: PromptTemplateManager,
+        tracer: WhiteboxTracer,
+        reading_agent: ResearchReadingAgent | None = None,
+        memory_agent: ResearchMemoryAgent | None = None,
+    ) -> None:
         self.llm = llm
         self.templates = templates
         self.tracer = tracer
+        self.reading_agent = reading_agent
+        self.memory_agent = memory_agent
 
-    def run(self, papers: List[Paper], trace_id: str, max_items: int | None = None) -> List[PaperAnalysis]:
+    def run(
+        self,
+        papers: List[Paper],
+        trace_id: str,
+        max_items: int | None = None,
+        slots: Dict[str, Any] | None = None,
+        user_id: str = "",
+    ) -> List[PaperAnalysis]:
         analyses: List[PaperAnalysis] = []
         capped = 5 if max_items is None else max(0, min(max_items, 5))
         selected_papers = papers[:capped]
+        resolved_slots = dict(slots or {})
+        pdf_path = str(resolved_slots.get("pdf_path") or "")
+        focus = str(resolved_slots.get("focus") or "")
         stage_token = self.llm.bind_stage("analyze")
         try:
             for paper in selected_papers:
+                deep_context = ""
+                if pdf_path and self.reading_agent is not None:
+                    reading_payload = self.reading_agent.build_analysis_context(
+                        paper,
+                        pdf_path=pdf_path,
+                        focus=focus,
+                        trace_id=trace_id,
+                    )
+                    sections = reading_payload.get("sections") or []
+                    chunks = reading_payload.get("chunks") or []
+                    deep_context = "\n".join(
+                        [
+                            "深度阅读材料：",
+                            *[
+                                f"- {section.get('heading', 'section')}: {str(section.get('text') or '')[:800]}"
+                                for section in sections[:3]
+                            ],
+                            *[f"- {str(chunk)[:800]}" for chunk in chunks[:4]],
+                        ]
+                    ).strip()
                 prompt = self.templates.render(
                     "paper_analysis",
                     title=paper.title,
                     abstract=paper.abstract,
-                    context=f"来源：{paper.source}, 年份：{paper.year}, 引用数：{paper.citations}",
+                    context=(
+                        f"来源：{paper.source}, 年份：{paper.year}, 引用数：{paper.citations}"
+                        + (f"\n{deep_context}" if deep_context else "")
+                    ),
                 )
                 raw = self.llm.call(prompt, purpose="论文分析", budgeted=True)
-                analyses.append(
-                    PaperAnalysis(
-                        paper=paper,
-                        summary=raw[:500],
-                        contributions=self._extract_lines(raw, "贡献"),
-                        methods=self._extract_lines(raw, "方法"),
-                        findings=self._extract_lines(raw, "发现"),
-                        limitations=self._extract_lines(raw, "局限"),
-                        raw_analysis=raw,
-                    )
+                analysis = PaperAnalysis(
+                    paper=paper,
+                    summary=raw[:500],
+                    contributions=self._extract_lines(raw, "贡献"),
+                    methods=self._extract_lines(raw, "方法"),
+                    findings=self._extract_lines(raw, "发现"),
+                    limitations=self._extract_lines(raw, "局限"),
+                    raw_analysis=raw,
                 )
+                analyses.append(analysis)
+                if user_id and self.memory_agent is not None:
+                    highlights = [*analysis.contributions[:2], *analysis.findings[:2]]
+                    self.memory_agent.remember_paper(
+                        user_id,
+                        paper,
+                        analysis.summary,
+                        highlights=highlights,
+                        trace_id=trace_id,
+                    )
         finally:
             self.llm.reset_stage(stage_token)
         self.tracer.trace_step(
             trace_id,
             "analyze",
             {"papers": [paper.title for paper in selected_papers]},
-            {"count": len(analyses), "analysis_limit": capped},
+            {
+                "count": len(analyses),
+                "analysis_limit": capped,
+                "deep_read_used": bool(pdf_path),
+                "focus": focus,
+            },
         )
         return analyses
 
@@ -781,7 +978,9 @@ class DebateAgent:
 
 
 class WriteAgent:
-    def __init__(self, llm: LLMManager, templates: PromptTemplateManager, tracer: WhiteboxTracer) -> None:
+    def __init__(
+        self, llm: LLMManager, templates: PromptTemplateManager, tracer: WhiteboxTracer
+    ) -> None:
         self.llm = llm
         self.templates = templates
         self.tracer = tracer
@@ -790,6 +989,7 @@ class WriteAgent:
         self,
         intent: str,
         query: str,
+        research_plan: ResearchPlan | None,
         search_result: SearchResult | None,
         analyses: List[PaperAnalysis],
         debate: DebateResult | None,
@@ -803,9 +1003,11 @@ class WriteAgent:
                 )
             answer = "\n".join(lines)
         else:
-            materials = self._compose_materials(search_result, analyses, debate)
+            materials = self._compose_materials(research_plan, search_result, analyses, debate)
             template_name, purpose = self._writer_profile(intent)
-            prompt = self.templates.render(template_name, topic=query, materials=materials)
+            prompt = self.templates.render(
+                template_name, topic=query, materials=materials
+            )
             stage_token = self.llm.bind_stage("write")
             try:
                 answer = self.llm.call(
@@ -816,7 +1018,9 @@ class WriteAgent:
                 )
             finally:
                 self.llm.reset_stage(stage_token)
-        self.tracer.trace_step(trace_id, "write", {"intent": intent}, {"answer_preview": answer[:500]})
+        self.tracer.trace_step(
+            trace_id, "write", {"intent": intent}, {"answer_preview": answer[:500]}
+        )
         return answer
 
     def _writer_profile(self, intent: str) -> tuple[str, str]:
@@ -831,11 +1035,19 @@ class WriteAgent:
 
     def _compose_materials(
         self,
+        research_plan: ResearchPlan | None,
         search_result: SearchResult | None,
         analyses: List[PaperAnalysis],
         debate: DebateResult | None,
     ) -> str:
         parts: List[str] = []
+        if research_plan is not None:
+            parts.append("研究计划：")
+            parts.append(f"- 目标：{research_plan.objective}")
+            parts.extend(
+                f"- 任务：{task.title} | 交付：{task.deliverable or '未指定'}"
+                for task in research_plan.tasks[:6]
+            )
         if search_result is not None:
             local_rag = search_result.trace.get("local_rag", {})
             local_results = local_rag.get("results") or []
@@ -859,7 +1071,9 @@ class WriteAgent:
             )
         if analyses:
             parts.append("\n分析结果：")
-            parts.extend(f"- {analysis.paper.title}: {analysis.summary}" for analysis in analyses)
+            parts.extend(
+                f"- {analysis.paper.title}: {analysis.summary}" for analysis in analyses
+            )
         if debate is not None:
             parts.append("\n辩论综合：")
             parts.append(debate.synthesis)
@@ -881,27 +1095,32 @@ class WriteAgent:
 
 
 class CoderAgent:
-    def __init__(self, llm: LLMManager, templates: PromptTemplateManager, tracer: WhiteboxTracer) -> None:
+    def __init__(
+        self, llm: LLMManager, templates: PromptTemplateManager, tracer: WhiteboxTracer
+    ) -> None:
         self.llm = llm
         self.templates = templates
         self.tracer = tracer
 
     def run(self, query: str, analyses: List[PaperAnalysis], trace_id: str) -> str:
         materials = "\n".join(
-            f"- {analysis.paper.title}: {analysis.summary}"
-            for analysis in analyses
+            f"- {analysis.paper.title}: {analysis.summary}" for analysis in analyses
         )
-        prompt = self.templates.render("code_generation", topic=query, materials=materials)
+        prompt = self.templates.render(
+            "code_generation", topic=query, materials=materials
+        )
         answer = self.llm.call(prompt, purpose="代码生成", budgeted=True)
-        self.tracer.trace_step(trace_id, "coder", {"query": query}, {"answer_preview": answer[:500]})
+        self.tracer.trace_step(
+            trace_id, "coder", {"query": query}, {"answer_preview": answer[:500]}
+        )
         return answer
 
 
 class MultiAgentCoordinator:
     intent_flows_full = {
-        "generate_survey": ["search", "analyze", "debate", "write"],
-        "compare_methods": ["search", "analyze", "debate", "write"],
-        "generate_code": ["search", "analyze", "coder"],
+        "generate_survey": ["plan", "search", "analyze", "debate", "write"],
+        "compare_methods": ["plan", "search", "analyze", "debate", "write"],
+        "generate_code": ["plan", "search", "analyze", "coder"],
         "search_papers": ["search", "write"],
         "daily_update": ["search", "analyze", "write"],
         "analyze_paper": ["search", "analyze", "write"],
@@ -909,9 +1128,9 @@ class MultiAgentCoordinator:
     }
 
     intent_flows_fast = {
-        "generate_survey": ["search", "analyze", "write"],
-        "compare_methods": ["search", "analyze", "write"],
-        "generate_code": ["search", "analyze", "coder"],
+        "generate_survey": ["plan", "search", "analyze", "write"],
+        "compare_methods": ["plan", "search", "analyze", "write"],
+        "generate_code": ["plan", "search", "analyze", "coder"],
         "search_papers": ["search", "write"],
         "daily_update": ["search", "analyze", "write"],
         "analyze_paper": ["search", "analyze", "write"],
@@ -926,10 +1145,27 @@ class MultiAgentCoordinator:
         reasoning: ReasoningEngine,
         templates: PromptTemplateManager,
         tracer: WhiteboxTracer,
+        memory_manager: MemoryManager | None = None,
     ) -> None:
         self.llm = llm
-        self.search_agent = SearchAgent(retriever, whitelist, tracer)
-        self.analyze_agent = AnalyzeAgent(llm, templates, tracer)
+        self.skills = ResearchSkillset(memory_manager)
+        self.planner_agent = ResearchPlannerAgent(self.skills, tracer)
+        self.research_search_agent = ResearchSearchAgent(self.skills, tracer)
+        self.reading_agent = ResearchReadingAgent(self.skills, tracer)
+        self.memory_agent = ResearchMemoryAgent(self.skills, tracer)
+        self.search_agent = SearchAgent(
+            retriever,
+            whitelist,
+            tracer,
+            research_search_agent=self.research_search_agent,
+        )
+        self.analyze_agent = AnalyzeAgent(
+            llm,
+            templates,
+            tracer,
+            reading_agent=self.reading_agent,
+            memory_agent=self.memory_agent,
+        )
         self.debate_agent = DebateAgent(reasoning, tracer)
         self.write_agent = WriteAgent(llm, templates, tracer)
         self.coder_agent = CoderAgent(llm, templates, tracer)
@@ -947,6 +1183,7 @@ class MultiAgentCoordinator:
         trace_id: str,
         task_config: TaskConfig | None = None,
         history: List[Dict[str, str]] | None = None,
+        session_id: str = "",
     ) -> Dict[str, Any]:
         flow = self._resolve_flow(intent=intent, mode=mode, task_config=task_config)
         if self.graph is None:
@@ -957,6 +1194,7 @@ class MultiAgentCoordinator:
                 trace_id=trace_id,
                 task_config=task_config,
                 history=history or [],
+                session_id=session_id,
                 flow=flow,
             )
 
@@ -966,6 +1204,7 @@ class MultiAgentCoordinator:
                 "intent": intent,
                 "slots": slots,
                 "mode": mode,
+                "session_id": session_id,
                 "trace_id": trace_id,
                 "task_config": task_config,
                 "history": history or [],
@@ -979,18 +1218,31 @@ class MultiAgentCoordinator:
         if StateGraph is None:
             return None
         graph = StateGraph(MultiAgentState)
+        graph.add_node("plan", self._plan_node)
         graph.add_node("search", self._search_node)
         graph.add_node("analyze", self._analyze_node)
         graph.add_node("debate", self._debate_node)
         graph.add_node("write", self._write_node)
         graph.add_node("coder", self._coder_node)
-        graph.add_edge(START, "search")
+        graph.add_edge(START, "plan")
+        graph.add_edge("plan", "search")
         graph.add_edge("search", "analyze")
         graph.add_edge("analyze", "debate")
         graph.add_edge("debate", "write")
         graph.add_edge("write", "coder")
         graph.add_edge("coder", END)
         return graph.compile()
+
+    def _plan_node(self, state: MultiAgentState) -> Dict[str, Any]:
+        if "plan" not in state.get("flow", []):
+            return {}
+        research_plan = self.planner_agent.run(
+            state["query"],
+            state["intent"],
+            state["slots"],
+            state["trace_id"],
+        )
+        return self._state_update(state, research_plan=research_plan)
 
     def _search_node(self, state: MultiAgentState) -> Dict[str, Any]:
         if "search" not in state.get("flow", []):
@@ -1001,6 +1253,7 @@ class MultiAgentCoordinator:
             state["slots"],
             state.get("history", []),
             state["trace_id"],
+            session_id=state.get("session_id", ""),
         )
         return self._state_update(state, search_result=search_result)
 
@@ -1020,6 +1273,8 @@ class MultiAgentCoordinator:
             search_result.papers,
             state["trace_id"],
             max_items=analysis_limit,
+            slots=state.get("slots") or {},
+            user_id=state.get("session_id", ""),
         )
         return self._state_update(state, analyses=analyses)
 
@@ -1041,6 +1296,7 @@ class MultiAgentCoordinator:
         answer = self.write_agent.run(
             state["intent"],
             state["query"],
+            state.get("research_plan"),
             state.get("search_result"),
             state.get("analyses") or [],
             state.get("debate"),
@@ -1074,16 +1330,23 @@ class MultiAgentCoordinator:
         trace_id: str,
         task_config: TaskConfig | None,
         history: List[Dict[str, str]],
+        session_id: str,
         flow: List[str],
     ) -> Dict[str, Any]:
         artifacts: Dict[str, Any] = {}
+        research_plan: ResearchPlan | None = None
         search_result: SearchResult | None = None
         analyses: List[PaperAnalysis] = []
         debate: DebateResult | None = None
 
         for index, step in enumerate(flow):
-            if step == "search":
-                search_result = self.search_agent.run(query, intent, slots, history, trace_id)
+            if step == "plan":
+                research_plan = self.planner_agent.run(query, intent, slots, trace_id)
+                artifacts["research_plan"] = research_plan
+            elif step == "search":
+                search_result = self.search_agent.run(
+                    query, intent, slots, history, trace_id, session_id=session_id
+                )
                 artifacts["search_result"] = search_result
             elif step == "analyze" and search_result is not None:
                 analysis_limit = self._resolve_analysis_limit(
@@ -1092,13 +1355,29 @@ class MultiAgentCoordinator:
                     query=query,
                     task_config=task_config,
                 )
-                analyses = self.analyze_agent.run(search_result.papers, trace_id, max_items=analysis_limit)
+                analyses = self.analyze_agent.run(
+                    search_result.papers,
+                    trace_id,
+                    max_items=analysis_limit,
+                    slots=slots,
+                    user_id=session_id,
+                )
                 artifacts["analyses"] = analyses
             elif step == "debate":
-                debate = self.debate_agent.run(query, analyses, trace_id, task_config=task_config)
+                debate = self.debate_agent.run(
+                    query, analyses, trace_id, task_config=task_config
+                )
                 artifacts["debate"] = debate
             elif step == "write":
-                artifacts["answer"] = self.write_agent.run(intent, query, search_result, analyses, debate, trace_id)
+                artifacts["answer"] = self.write_agent.run(
+                    intent,
+                    query,
+                    research_plan,
+                    search_result,
+                    analyses,
+                    debate,
+                    trace_id,
+                )
             elif step == "coder":
                 artifacts["answer"] = self.coder_agent.run(query, analyses, trace_id)
 
@@ -1111,7 +1390,11 @@ class MultiAgentCoordinator:
         mode: ExecutionMode,
         task_config: TaskConfig | None,
     ) -> List[str]:
-        flow_map = self.intent_flows_fast if mode == ExecutionMode.FAST else self.intent_flows_full
+        flow_map = (
+            self.intent_flows_fast
+            if mode == ExecutionMode.FAST
+            else self.intent_flows_full
+        )
         if task_config is not None and not task_config.enable_multi_agent:
             flow_map = self.intent_flows_fast
         return list(flow_map.get(intent, ["search", "write"]))
