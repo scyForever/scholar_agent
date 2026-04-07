@@ -405,7 +405,8 @@ src/
 ### 7.2 当前重要文件
 
 - `src/core/agent_v2.py`
-- `src/core/runtime_graph.py`
+- `src/pipeline/runtime_graph.py`
+- `src/pipeline/graph.py`
 - `src/agents/multi_agent.py`
 - `src/agents/research_agents.py`
 - `src/skills/research_skills.py`

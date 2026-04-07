@@ -7,9 +7,9 @@ from typing import Any, Callable, Dict
 from src.agents.multi_agent import MultiAgentCoordinator
 from src.core.llm import LLMManager
 from src.core.models import AgentResponse, ExecutionMode, MemoryType, SearchResult
-from src.core.runtime_graph import AgentRuntimeGraph
 from src.feedback.collector import FeedbackCollector
 from src.memory.manager import MemoryManager
+from src.pipeline import AgentRuntimeGraph
 from src.planning.task_hierarchy import TaskHierarchyPlanner
 from src.preprocessing.dialogue_manager import DialogueManager
 from src.preprocessing.intent_classifier import IntentClassifier

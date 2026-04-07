@@ -211,5 +211,17 @@ reports/
 cache/
 data/memory/
 data/vector_db/
+
+# 本地运行产物与敏感配置
 .codex
 api_keys.py
+.env.local
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+config/secrets/
+projects/

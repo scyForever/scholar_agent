@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, TypedDict
+from typing import Any, Dict, List
 
 from src.agents.multi_agent import MultiAgentCoordinator
 from src.core.models import ExecutionMode, SearchResult
+from src.pipeline.state import RuntimeState
 from src.planning.task_hierarchy import TaskConfig
 from src.quality.enhancer import QualityEnhancer
 from src.reasoning.engine import ReasoningEngine
@@ -15,22 +16,6 @@ except ImportError:  # pragma: no cover
     END = None
     START = None
     StateGraph = None
-
-
-class RuntimeState(TypedDict, total=False):
-    query: str
-    intent: str
-    slots: Dict[str, Any]
-    session_id: str
-    trace_id: str
-    task_config: TaskConfig | None
-    history: List[Dict[str, str]]
-    memory_context: str
-    prior_search_result: SearchResult | None
-    execution_mode: ExecutionMode
-    enable_quality_enhance: bool
-    answer: str
-    artifacts: Dict[str, Any]
 
 
 class AgentRuntimeGraph:
@@ -258,5 +243,7 @@ class AgentRuntimeGraph:
                     },
                 )
 
-        artifacts["answer"] = answer
-        return {"answer": answer, "artifacts": artifacts}
+        return {
+            "answer": answer,
+            "artifacts": artifacts,
+        }
