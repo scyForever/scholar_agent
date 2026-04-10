@@ -80,6 +80,7 @@ class MultiAgentCoordinator:
         self.write_agent = WriteAgent(llm, templates, tracer)
         self.coder_agent = CoderAgent(llm, templates, tracer)
         self.pipeline = MultiAgentPipeline(self)
+        self.harness = self.pipeline.harness
         self.graph = self.pipeline.graph
 
     def uses_langgraph(self) -> bool:

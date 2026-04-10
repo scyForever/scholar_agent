@@ -2,7 +2,8 @@
 
 当前文档已经按最新实现同步，核心口径如下：
 
-- 架构已拆分为 `tools -> skills -> agents -> runtime`
+- 架构对外建议表述为 `runtime -> agents -> skills -> tools/rag`，主执行链路由 `harness` 统一收口
+- `skills / tools / rag` 三层已完成入口 harness 化，底层实现进一步拆成独立组件包
 - 本地 RAG 基于 `SQLite + Chroma + BGE-M3 + BGE Reranker`
 - 研究层新增了论文获取、深度阅读、研究规划、研究记忆
 - OCR 已接入文档解析链路
@@ -75,6 +76,8 @@
 
 ## 3. 当前实现的几个关键提醒
 
+- `research_search_tool.py`、`research_document_tool.py`、`rag/retriever.py` 现在主要是兼容入口，真实底层逻辑分别位于 `src/tools/search_components/`、`src/tools/document_components/`、`src/rag/components/`
+- `src/skills/research_skills.py` 现在主要是兼容外观层，研究规划、搜索、阅读、记忆的具体实现位于 `src/skills/components/`
 - 本地 RAG 和外部学术搜索是协同关系，不是同一个存储层
 - 外部检索结果不会自动写入本地向量库
 - 搜索规划不是固定依赖远程 LLM；远程不可用时会退回本地确定性策略

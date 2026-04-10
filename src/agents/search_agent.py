@@ -10,7 +10,8 @@ from src.core.models import Paper, SearchResult
 from src.core.structured_outputs import SearchAgentExecutionStep, SearchAgentFinalOutput
 from src.preprocessing.query_rewriter import QueryRewriter
 from src.rag.retriever import HybridRetriever
-from src.tools import TOOL_REGISTRY
+from src.tools import TOOL_REGISTRY, TOOL_REGISTRY_HARNESS
+from src.tools.contracts import ToolExecutionRequest
 from src.whitelist.manager import WhitelistManager
 from src.whitebox.tracer import WhiteboxTracer
 
@@ -418,11 +419,15 @@ class SearchAgent:
                     }
                 )
                 return self._normalize_tool_papers(result)
-            result = TOOL_REGISTRY.call(
-                tool_name,
-                query=query,
-                max_results=max_results,
-                time_range=time_range,
+            result = TOOL_REGISTRY_HARNESS.execute(
+                ToolExecutionRequest(
+                    name=tool_name,
+                    kwargs={
+                        "query": query,
+                        "max_results": max_results,
+                        "time_range": time_range,
+                    },
+                )
             )
             return self._normalize_tool_papers(result)
         except TypeError:
@@ -430,7 +435,15 @@ class SearchAgent:
                 tool = TOOL_REGISTRY.get_langchain_tool(tool_name)
                 result = tool.invoke({"query": query, "max_results": max_results})
                 return self._normalize_tool_papers(result)
-            result = TOOL_REGISTRY.call(tool_name, query=query, max_results=max_results)
+            result = TOOL_REGISTRY_HARNESS.execute(
+                ToolExecutionRequest(
+                    name=tool_name,
+                    kwargs={
+                        "query": query,
+                        "max_results": max_results,
+                    },
+                )
+            )
             return self._normalize_tool_papers(result)
         except Exception:
             return []

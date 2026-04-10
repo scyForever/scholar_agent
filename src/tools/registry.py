@@ -6,6 +6,8 @@ from typing import Any, Callable, Dict, List, Sequence, Type
 
 from pydantic import Field, create_model
 
+from src.tools.contracts import ToolExecutionRequest
+
 try:
     from langchain_core.tools import BaseTool, StructuredTool
 except ImportError:  # pragma: no cover
@@ -154,11 +156,42 @@ class ToolRegistry:
         return "\n".join(parameter_lines)
 
 
-TOOL_REGISTRY = ToolRegistry()
+class ToolRegistryHarness:
+    """工具注册与执行入口 harness。"""
+
+    def __init__(self, registry: ToolRegistry | None = None) -> None:
+        self.registry = registry or ToolRegistry()
+
+    def register(self, definition: ToolDefinition, func: Callable[..., Any]) -> Callable[..., Any]:
+        return self.registry.register(definition, func)
+
+    def execute(self, request: ToolExecutionRequest) -> Any:
+        return self.registry.call(request.name, **dict(request.kwargs))
+
+    def get_definition(self, name: str) -> ToolDefinition:
+        return self.registry.get_definition(name)
+
+    def list_tools(self) -> List[ToolDefinition]:
+        return self.registry.list_tools()
+
+    def get_langchain_tool(self, name: str) -> BaseTool:
+        return self.registry.get_langchain_tool(name)
+
+    def list_langchain_tools(
+        self,
+        *,
+        names: Sequence[str] | None = None,
+        tags: Sequence[str] | None = None,
+    ) -> List[BaseTool]:
+        return self.registry.list_langchain_tools(names=names, tags=tags)
+
+
+TOOL_REGISTRY_HARNESS = ToolRegistryHarness()
+TOOL_REGISTRY = TOOL_REGISTRY_HARNESS.registry
 
 
 def register_tool(definition: ToolDefinition) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-        return TOOL_REGISTRY.register(definition, func)
+        return TOOL_REGISTRY_HARNESS.register(definition, func)
 
     return decorator

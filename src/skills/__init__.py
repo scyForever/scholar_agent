@@ -1,3 +1,10 @@
+from .harness import (
+    DeepReadingSkillHarness,
+    LiteratureSearchSkillHarness,
+    ResearchMemorySkillHarness,
+    ResearchPlanningSkillHarness,
+    ResearchSkillsHarness,
+)
 from .research_skills import (
     DeepReadingSkill,
     LiteratureSearchSkill,
@@ -12,4 +19,9 @@ __all__ = [
     "ResearchPlanningSkill",
     "ResearchMemorySkill",
     "ResearchSkillset",
+    "LiteratureSearchSkillHarness",
+    "DeepReadingSkillHarness",
+    "ResearchPlanningSkillHarness",
+    "ResearchMemorySkillHarness",
+    "ResearchSkillsHarness",
 ]

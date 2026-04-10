@@ -8,7 +8,8 @@ from typing import Any, Dict, Iterable, List
 from src.core.llm import LLMManager
 from src.core.models import IndexedChunk, Paper, ReasoningResult
 from src.rag.retriever import HybridRetriever
-from src.tools import TOOL_REGISTRY
+from src.tools import TOOL_REGISTRY, TOOL_REGISTRY_HARNESS
+from src.tools.contracts import ToolExecutionRequest
 from src.whitelist.manager import WhitelistManager
 from src.whitebox.tracer import WhiteboxTracer
 
@@ -537,7 +538,12 @@ class ReasoningEngine:
 
             definition = TOOL_REGISTRY.get_definition(tool_name)
             kwargs = self._build_tool_kwargs(definition.parameters, action_input, fallback_query=query)
-            result = TOOL_REGISTRY.call(tool_name, **kwargs)
+            result = TOOL_REGISTRY_HARNESS.execute(
+                ToolExecutionRequest(
+                    name=tool_name,
+                    kwargs=kwargs,
+                )
+            )
             observation = self._summarize_tool_result(tool_name, result)
             return observation, {
                 "tool_name": tool_name,

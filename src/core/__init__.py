@@ -5,6 +5,7 @@ from typing import Any
 __all__ = [
     "Agent",
     "AgentV2",
+    "ScholarAgentHarness",
     "LLMManager",
     "Paper",
     "SearchResult",
@@ -23,6 +24,10 @@ def __getattr__(name: str) -> Any:
         from .agent_v2 import AgentV2
 
         return AgentV2
+    if name == "ScholarAgentHarness":
+        from src.harness import ScholarAgentHarness
+
+        return ScholarAgentHarness
     if name == "LLMManager":
         from .llm import LLMManager
 

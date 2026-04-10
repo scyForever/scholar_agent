@@ -90,14 +90,6 @@ def _provider_defaults() -> Dict[str, Dict[str, Any]]:
         #     ),
         #     "api_key_name": "SCNET_API_KEY",
         # },
-        "scnet": {
-            "priority": 4,
-            "model": os.getenv("SCNET_MODEL", "qwen/qwen3.6-plus-preview:free"),
-            "base_url": os.getenv(
-                "SCNET_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"
-            ),
-            "api_key_name": "SCNET_API_KEY",
-        },
         "siliconflow": {
             "priority": 3,
             "model": os.getenv("SILICONFLOW_MODEL", "Pro/moonshotai/Kimi-K2.5"),
