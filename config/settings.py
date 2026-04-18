@@ -99,7 +99,7 @@ def _provider_defaults() -> Dict[str, Dict[str, Any]]:
             "api_key_name": "SCNET_API_KEY",
         },
         "siliconflow": {
-            "priority": 3,
+            "priority": 4,
             "model": os.getenv("SILICONFLOW_MODEL", "Pro/moonshotai/Kimi-K2.5"),
             "base_url": os.getenv(
                 "SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1/chat/completions"

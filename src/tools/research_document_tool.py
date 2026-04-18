@@ -46,6 +46,8 @@ SECTION_HEADING_RE = re.compile(
 FORMULA_LINE_RE = re.compile(r"[=+\-*/^_\\]|(?:\([0-9]{1,3}\)\s*$)")
 FIGURE_CAPTION_RE = re.compile(r"^(figure|fig\.)\s*\d+", flags=re.IGNORECASE)
 TABLE_CAPTION_RE = re.compile(r"^table\s*\d+", flags=re.IGNORECASE)
+SENTENCE_SPLIT_RE = re.compile(r".+?(?:[。！？!?；;]+(?=\s|$)|\.(?=\s|$)|$)", flags=re.S)
+CLAUSE_SPLIT_RE = re.compile(r"[^，,、；;：:]+[，,、；;：:]?", flags=re.S)
 
 
 def _clean_text(text: str) -> str:
@@ -61,19 +63,141 @@ def _slug(value: str) -> str:
     return cleaned.strip("-") or "document"
 
 
-def _chunk_text(text: str, chunk_size: int = 1200, overlap: int = 200) -> List[str]:
-    normalized = " ".join(str(text or "").split())
+def _normalize_chunk_source(text: str) -> str:
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    normalized = re.sub(r"[ \t]+\n", "\n", normalized)
+    normalized = re.sub(r"\n[ \t]+", "\n", normalized)
+    normalized = re.sub(r"[ \t]+", " ", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
+
+
+def _split_paragraphs(text: str) -> List[str]:
+    return [part.strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
+
+
+def _split_lines(text: str) -> List[str]:
+    return [part.strip() for part in text.splitlines() if part.strip()]
+
+
+def _split_sentences(text: str) -> List[str]:
+    return [
+        _normalize_inline_whitespace(match.group(0))
+        for match in SENTENCE_SPLIT_RE.finditer(text)
+        if match.group(0).strip()
+    ]
+
+
+def _split_clauses(text: str) -> List[str]:
+    return [
+        _normalize_inline_whitespace(match.group(0))
+        for match in CLAUSE_SPLIT_RE.finditer(text)
+        if match.group(0).strip()
+    ]
+
+
+def _split_words(text: str) -> List[str]:
+    return [part for part in text.split() if part]
+
+
+def _split_characters(text: str) -> List[str]:
+    return [char for char in text if char]
+
+
+def _merge_splits(splits: List[str], *, separator: str, chunk_size: int, overlap: int) -> List[str]:
+    if not splits:
+        return []
+
+    chunks: List[str] = []
+    current_parts: List[str] = []
+    current_length = 0
+    separator_length = len(separator)
+
+    for split in splits:
+        split_length = len(split)
+        additional_length = split_length if not current_parts else separator_length + split_length
+
+        if current_parts and current_length + additional_length > chunk_size:
+            chunk = separator.join(current_parts).strip()
+            if chunk:
+                chunks.append(chunk)
+            while current_parts and (
+                current_length > overlap or current_length + additional_length > chunk_size
+            ):
+                removed = current_parts.pop(0)
+                current_length -= len(removed)
+                if current_parts:
+                    current_length -= separator_length
+            additional_length = split_length if not current_parts else separator_length + split_length
+
+        current_parts.append(split)
+        current_length += additional_length
+
+    if current_parts:
+        chunk = separator.join(current_parts).strip()
+        if chunk:
+            chunks.append(chunk)
+
+    return chunks
+
+
+def _recursive_split_text(
+    text: str,
+    *,
+    chunk_size: int,
+    overlap: int,
+    level: int = 0,
+) -> List[str]:
+    # 按段落、换行、句子、分句、词和字符逐层细化，避免优先打断自然语义边界。
+    normalized = _normalize_chunk_source(text)
     if not normalized:
         return []
+    if len(normalized) <= chunk_size:
+        return [normalized]
+
+    splitters = [
+        (_split_paragraphs, "\n\n"),
+        (_split_lines, "\n"),
+        (_split_sentences, " "),
+        (_split_clauses, " "),
+        (_split_words, " "),
+        (_split_characters, ""),
+    ]
+
+    if level >= len(splitters):
+        return [normalized[index : index + chunk_size] for index in range(0, len(normalized), chunk_size)]
+
+    splitter, separator = splitters[level]
+    parts = splitter(normalized)
+    if len(parts) <= 1:
+        return _recursive_split_text(normalized, chunk_size=chunk_size, overlap=overlap, level=level + 1)
+
     chunks: List[str] = []
-    start = 0
-    while start < len(normalized):
-        end = min(start + chunk_size, len(normalized))
-        chunks.append(normalized[start:end])
-        if end >= len(normalized):
-            break
-        start = max(end - overlap, start + 1)
-    return chunks
+    buffered_parts: List[str] = []
+    for part in parts:
+        if len(part) > chunk_size:
+            if buffered_parts:
+                chunks.extend(
+                    _merge_splits(buffered_parts, separator=separator, chunk_size=chunk_size, overlap=overlap)
+                )
+                buffered_parts = []
+            chunks.extend(_recursive_split_text(part, chunk_size=chunk_size, overlap=overlap, level=level + 1))
+            continue
+        buffered_parts.append(part)
+
+    if buffered_parts:
+        chunks.extend(_merge_splits(buffered_parts, separator=separator, chunk_size=chunk_size, overlap=overlap))
+
+    return [_normalize_chunk_source(chunk) for chunk in chunks if _normalize_chunk_source(chunk)]
+
+
+def _chunk_text(text: str, chunk_size: int = 1200, overlap: int = 200) -> List[str]:
+    normalized = _normalize_chunk_source(text)
+    if not normalized:
+        return []
+    safe_chunk_size = max(int(chunk_size), 1)
+    safe_overlap = max(min(int(overlap), safe_chunk_size - 1), 0)
+    return _recursive_split_text(normalized, chunk_size=safe_chunk_size, overlap=safe_overlap)
 
 
 def _normalize_heading(text: str) -> str:
@@ -397,6 +521,7 @@ class PDFReadingService:
                     "page_count": len(page_texts),
                     "double_column_detected": any(item.metadata.get("layout") == "double_column" for item in sections),
                     "target_section": target_section,
+                    "chunk_strategy": "recursive_character_splitting",
                 },
             )
 

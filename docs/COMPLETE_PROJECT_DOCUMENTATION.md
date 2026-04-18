@@ -52,6 +52,7 @@
 
 - 主说明文档：`../README.md`
 - 快速开始：`./QUICKSTART.md`
+- 功能实现文档：`./功能实现文档.md`
 - 面试速记版：`./INTERVIEW_GUIDE.md`
 - 文档总览：`./PROJECT_DOCUMENTATION.md`
 - RAG 可视化流程图：`../RAG_v3_完整流程图.html`
