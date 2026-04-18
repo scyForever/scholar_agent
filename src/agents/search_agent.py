@@ -11,6 +11,14 @@ from src.core.structured_outputs import SearchAgentExecutionStep, SearchAgentFin
 from src.preprocessing.query_rewriter import QueryRewriter
 from src.rag.retriever import HybridRetriever
 from src.tools import TOOL_REGISTRY
+from src.tools.research_search_tool import (
+    FUSION_SOURCE_COUNT_KEY,
+    compute_fusion_score,
+    diversify_ranked_papers,
+    merge_paper_records,
+    paper_identity_key,
+    register_source_observation,
+)
 from src.whitelist.manager import WhitelistManager
 from src.whitebox.tracer import WhiteboxTracer
 
@@ -145,11 +153,16 @@ class SearchAgent:
         )
         aggregated = search_payload["aggregated"]
 
-        papers = sorted(
+        papers = diversify_ranked_papers(sorted(
             aggregated.values(),
-            key=lambda item: (item.score, item.citations, item.year or 0),
+            key=lambda item: (
+                item.score,
+                int((item.metadata or {}).get(FUSION_SOURCE_COUNT_KEY, 1) or 1),
+                item.citations,
+                item.year or 0,
+            ),
             reverse=True,
-        )[:max_results]
+        ), limit=max_results)[:max_results]
         memory_trace: Dict[str, Any] = {}
         if session_id and self.research_search_agent is not None:
             ranked = self.research_search_agent.skills.memory.rank_unseen_first(
@@ -195,11 +208,6 @@ class SearchAgent:
         )
         self.tracer.trace_step(trace_id, "search", {"query": topic}, asdict(result))
         return result
-
-    def _paper_score(self, paper: Paper) -> float:
-        recency = float((paper.year or 0) / 3000)
-        citations = min(paper.citations / 1000.0, 1.0)
-        return 0.55 * citations + 0.45 * recency
 
     def _run_external_search(
         self,
@@ -382,7 +390,11 @@ class SearchAgent:
                 )
                 if papers:
                     used = True
-                self._merge_papers(aggregated, papers)
+                self._merge_papers(
+                    aggregated,
+                    papers,
+                    query=str(artifact.get("query") or ""),
+                )
             if used and tool_name not in selected_tools:
                 selected_tools.append(tool_name)
         final_output = self._fallback_agent_final_output(
@@ -453,14 +465,25 @@ class SearchAgent:
                     continue
         return papers
 
-    def _merge_papers(self, aggregated: Dict[str, Paper], papers: List[Paper]) -> None:
-        for paper in papers:
-            key = (paper.title or "").strip().lower()
+    def _merge_papers(
+        self,
+        aggregated: Dict[str, Paper],
+        papers: List[Paper],
+        *,
+        query: str,
+    ) -> None:
+        for rank, paper in enumerate(papers):
+            register_source_observation(paper, source_name=paper.source, source_rank=rank)
+            key = paper_identity_key(paper) or (paper.title or "").strip().lower()
             if not key:
                 continue
-            paper.score = self._paper_score(paper)
-            if key not in aggregated or paper.score > aggregated[key].score:
+            paper.score = compute_fusion_score(paper, query=query)
+            current = aggregated.get(key)
+            if current is None:
                 aggregated[key] = paper
+                continue
+            merge_paper_records(current, paper)
+            current.score = compute_fusion_score(current, query=query)
 
     def _supports_agentic_search(self) -> bool:
         return (
@@ -630,7 +653,11 @@ class SearchAgent:
                     for payload in artifact.get("papers") or []
                     if isinstance(payload, dict)
                 ]
-                self._merge_papers(aggregated, papers)
+                self._merge_papers(
+                    aggregated,
+                    papers,
+                    query=rewritten,
+                )
 
         return {
             "aggregated": aggregated,
@@ -733,11 +760,16 @@ class SearchAgent:
                 "source": paper.source,
                 "citations": paper.citations,
             }
-            for paper in sorted(
+            for paper in diversify_ranked_papers(sorted(
                 payload["aggregated"].values(),
-                key=lambda item: (item.score, item.citations, item.year or 0),
+                key=lambda item: (
+                    item.score,
+                    int((item.metadata or {}).get(FUSION_SOURCE_COUNT_KEY, 1) or 1),
+                    item.citations,
+                    item.year or 0,
+                ),
                 reverse=True,
-            )[:8]
+            ), limit=8)[:8]
         ]
         return (
             "你是 ScholarAgent 的搜索结果结构化汇总器。\n"
@@ -764,11 +796,16 @@ class SearchAgent:
         aggregated: Dict[str, Paper],
         summary_reason: str,
     ) -> SearchAgentFinalOutput:
-        ranked_papers = sorted(
+        ranked_papers = diversify_ranked_papers(sorted(
             aggregated.values(),
-            key=lambda item: (item.score, item.citations, item.year or 0),
+            key=lambda item: (
+                item.score,
+                int((item.metadata or {}).get(FUSION_SOURCE_COUNT_KEY, 1) or 1),
+                item.citations,
+                item.year or 0,
+            ),
             reverse=True,
-        )
+        ))
         execution_plan = [
             SearchAgentExecutionStep(
                 tool_name=str(call.get("tool_name") or ""),

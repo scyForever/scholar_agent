@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+import math
 import re
 from typing import Any, Dict, Iterable, List, Sequence
 import xml.etree.ElementTree as ET
@@ -29,6 +30,10 @@ DEFAULT_HEADERS = {
 ARXIV_ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 SCHOLAR_YEAR_RE = re.compile(r"(19|20)\d{2}")
 DOI_RE = re.compile(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", flags=re.IGNORECASE)
+ARXIV_ADVANCED_QUERY_RE = re.compile(r"\b(?:ti|au|abs|cat|co|jr|rn|id|all)\s*:", flags=re.IGNORECASE)
+FUSION_SOURCES_KEY = "_fusion_sources"
+FUSION_SOURCE_COUNT_KEY = "_fusion_source_count"
+FUSION_BEST_SOURCE_RANK_KEY = "_fusion_best_source_rank"
 
 
 def _parse_time_range(time_range: str) -> tuple[int | None, int | None]:
@@ -79,6 +84,75 @@ def _text_matches_query(title: str, abstract: str, query: str) -> bool:
     return any(term in haystack for term in terms)
 
 
+def _normalize_query_text(text: str) -> str:
+    return " ".join(str(text or "").split()).strip()
+
+
+def _quote_arxiv_value(value: str) -> str:
+    escaped = _normalize_query_text(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _format_arxiv_field(field: str, value: str) -> str:
+    normalized = _normalize_query_text(value)
+    if not normalized:
+        return ""
+    if re.search(r'[\s:()"\\-]', normalized):
+        return f"{field}:{_quote_arxiv_value(normalized)}"
+    return f"{field}:{normalized}"
+
+
+def _looks_like_arxiv_advanced_query(query: str) -> bool:
+    normalized = _normalize_query_text(query)
+    if not normalized:
+        return False
+    return bool(
+        ARXIV_ADVANCED_QUERY_RE.search(normalized)
+        or any(marker in normalized for marker in ("(", ")"))
+        or re.search(r"\b(?:AND|OR|ANDNOT)\b", normalized)
+    )
+
+
+def _build_arxiv_search_query(query: str, author: str = "") -> str:
+    normalized_query = _normalize_query_text(query)
+    normalized_author = _normalize_query_text(author)
+
+    if _looks_like_arxiv_advanced_query(normalized_query):
+        topic_clause = normalized_query
+    else:
+        terms = _normalized_terms(normalized_query)
+        if not terms:
+            topic_clause = ""
+        elif len(terms) == 1:
+            topic_clause = _format_arxiv_field("all", terms[0])
+        else:
+            phrase_clauses = [
+                _format_arxiv_field("ti", normalized_query),
+                _format_arxiv_field("abs", normalized_query),
+            ]
+            conjunction = " AND ".join(
+                clause for clause in (_format_arxiv_field("all", term) for term in terms) if clause
+            )
+            topic_parts = []
+            phrase_group = " OR ".join(clause for clause in phrase_clauses if clause)
+            if phrase_group:
+                topic_parts.append(f"({phrase_group})")
+            if conjunction:
+                topic_parts.append(f"({conjunction})")
+            topic_clause = " OR ".join(topic_parts)
+            if len(topic_parts) > 1:
+                topic_clause = f"({topic_clause})"
+
+    if normalized_author:
+        author_clause = _format_arxiv_field("au", normalized_author)
+        if topic_clause:
+            return f"({topic_clause}) AND {author_clause}"
+        return author_clause
+    if topic_clause:
+        return topic_clause
+    return _format_arxiv_field("all", normalized_query)
+
+
 def _relevance_score(paper: Paper, query: str, author: str = "") -> float:
     haystack = f"{paper.title} {paper.abstract} {' '.join(paper.keywords)}".lower()
     score = 0.0
@@ -108,27 +182,231 @@ def _maybe_doi(text: str) -> str:
     return match.group(0) if match else ""
 
 
+def paper_identity_key(paper: Paper) -> str:
+    key = "||".join(
+        [
+            (paper.doi or "").strip().lower(),
+            (paper.arxiv_id or "").strip().lower(),
+            (paper.title or "").strip().lower(),
+        ]
+    )
+    return key
+
+
+def _merge_unique_strings(*groups: Iterable[str]) -> List[str]:
+    merged: List[str] = []
+    seen = set()
+    for group in groups:
+        for item in group:
+            normalized = str(item or "").strip()
+            lowered = normalized.lower()
+            if not normalized or lowered in seen:
+                continue
+            merged.append(normalized)
+            seen.add(lowered)
+    return merged
+
+
+def _metadata_completeness_signal(paper: Paper) -> float:
+    checks = [
+        bool((paper.abstract or "").strip()),
+        bool(paper.authors),
+        bool((paper.venue or "").strip()),
+        bool((paper.pdf_url or paper.full_text_url or paper.html_url or "").strip()),
+        bool((paper.doi or paper.arxiv_id or paper.pmid or paper.pmcid or "").strip()),
+        bool(paper.categories or paper.keywords),
+        bool(paper.open_access),
+    ]
+    return sum(1.0 for item in checks if item) / max(len(checks), 1)
+
+
+def _accessibility_signal(paper: Paper) -> float:
+    return float(
+        3 * bool((paper.pdf_url or "").strip())
+        + 2 * bool((paper.full_text_url or paper.html_url or "").strip())
+        + 2 * bool(paper.open_access)
+        + bool((paper.arxiv_id or paper.pmcid or "").strip())
+    )
+
+
+def register_source_observation(paper: Paper, *, source_name: str = "", source_rank: int = 0) -> Paper:
+    metadata = dict(paper.metadata or {})
+    source_value = str(source_name or paper.source or "").strip()
+    known_sources = {
+        str(item).strip()
+        for item in metadata.get(FUSION_SOURCES_KEY, [])
+        if str(item).strip()
+    }
+    if source_value:
+        known_sources.add(source_value)
+    metadata[FUSION_SOURCES_KEY] = sorted(known_sources)
+    metadata[FUSION_SOURCE_COUNT_KEY] = len(known_sources)
+    best_rank = metadata.get(FUSION_BEST_SOURCE_RANK_KEY)
+    if best_rank is None or int(source_rank) < int(best_rank):
+        metadata[FUSION_BEST_SOURCE_RANK_KEY] = int(source_rank)
+    paper.metadata = metadata
+    return paper
+
+
+def merge_paper_records(current: Paper, incoming: Paper) -> Paper:
+    register_source_observation(current, source_name=current.source)
+    register_source_observation(incoming, source_name=incoming.source)
+
+    current.metadata[FUSION_SOURCES_KEY] = _merge_unique_strings(
+        current.metadata.get(FUSION_SOURCES_KEY, []),
+        incoming.metadata.get(FUSION_SOURCES_KEY, []),
+    )
+    current.metadata[FUSION_SOURCE_COUNT_KEY] = len(current.metadata[FUSION_SOURCES_KEY])
+    current.metadata[FUSION_BEST_SOURCE_RANK_KEY] = min(
+        int(current.metadata.get(FUSION_BEST_SOURCE_RANK_KEY, 0)),
+        int(incoming.metadata.get(FUSION_BEST_SOURCE_RANK_KEY, 0)),
+    )
+
+    if len((incoming.abstract or "").strip()) > len((current.abstract or "").strip()):
+        current.abstract = incoming.abstract
+    if len(incoming.authors) > len(current.authors):
+        current.authors = list(incoming.authors)
+    current.categories = _merge_unique_strings(current.categories, incoming.categories)
+    current.keywords = _merge_unique_strings(current.keywords, incoming.keywords)
+
+    current.citations = max(int(current.citations or 0), int(incoming.citations or 0))
+    current.year = max(
+        [year for year in (current.year, incoming.year) if isinstance(year, int)],
+        default=current.year or incoming.year,
+    )
+
+    for attr in ("doi", "arxiv_id", "pmid", "pmcid", "venue"):
+        if not getattr(current, attr) and getattr(incoming, attr):
+            setattr(current, attr, getattr(incoming, attr))
+
+    current.open_access = bool(current.open_access or incoming.open_access)
+
+    if _accessibility_signal(incoming) > _accessibility_signal(current):
+        current.source = incoming.source or current.source
+        current.url = incoming.url or current.url
+        current.pdf_url = incoming.pdf_url or current.pdf_url
+        current.full_text_url = incoming.full_text_url or current.full_text_url
+        current.html_url = incoming.html_url or current.html_url
+        if incoming.venue:
+            current.venue = incoming.venue
+    else:
+        current.url = current.url or incoming.url
+        current.pdf_url = current.pdf_url or incoming.pdf_url
+        current.full_text_url = current.full_text_url or incoming.full_text_url
+        current.html_url = current.html_url or incoming.html_url
+
+    for key, value in (incoming.metadata or {}).items():
+        if key not in current.metadata and value not in (None, "", [], {}):
+            current.metadata[key] = value
+    return current
+
+
+def _term_coverage_signal(paper: Paper, query: str) -> float:
+    normalized_query = _normalize_query_text(query).lower()
+    terms = list(dict.fromkeys(_normalized_terms(normalized_query)))
+    if not terms:
+        return 0.0
+    title = (paper.title or "").lower()
+    haystack = f"{paper.title} {paper.abstract} {' '.join(paper.keywords)} {' '.join(paper.categories)}".lower()
+    matched = sum(1 for term in terms if term in haystack)
+    title_matched = sum(1 for term in terms if term in title)
+    coverage = matched / len(terms)
+    title_coverage = title_matched / len(terms)
+    phrase_bonus = 0.0
+    if normalized_query and normalized_query in haystack:
+        phrase_bonus += 0.15
+    if normalized_query and normalized_query in title:
+        phrase_bonus += 0.12
+    return min(1.2, 0.65 * coverage + 0.35 * title_coverage + phrase_bonus)
+
+
+def _citation_signal(citations: int) -> float:
+    return min(math.log1p(max(int(citations or 0), 0)) / math.log1p(2000), 1.0)
+
+
+def _recency_signal(year: int | None) -> float:
+    if year is None:
+        return 0.0
+    age = max(datetime.now().year - int(year), 0)
+    return max(0.0, 1.0 - min(age, 15) / 15.0)
+
+
+def _author_signal(paper: Paper, author: str = "") -> float:
+    normalized = str(author or "").strip().lower()
+    if not normalized:
+        return 0.0
+    return 1.0 if any(normalized in str(item).lower() for item in paper.authors) else 0.0
+
+
+def compute_fusion_score(paper: Paper, query: str, author: str = "") -> float:
+    register_source_observation(paper, source_name=paper.source)
+    metadata = paper.metadata or {}
+    source_count = max(int(metadata.get(FUSION_SOURCE_COUNT_KEY, 1) or 1), 1)
+    best_source_rank = max(int(metadata.get(FUSION_BEST_SOURCE_RANK_KEY, 0) or 0), 0)
+    source_rank_signal = max(0.0, 1.0 - min(best_source_rank, 9) / 10.0)
+    source_support_signal = min(0.12 * max(source_count - 1, 0), 0.24)
+    score = (
+        2.2 * _term_coverage_signal(paper, query)
+        + 0.45 * _recency_signal(paper.year)
+        + 0.28 * _citation_signal(paper.citations)
+        + 0.22 * _metadata_completeness_signal(paper)
+        + 0.15 * source_rank_signal
+        + source_support_signal
+        + 0.18 * _author_signal(paper, author)
+    )
+    return float(score)
+
+
+def diversify_ranked_papers(papers: Sequence[Paper], *, limit: int | None = None) -> List[Paper]:
+    remaining = list(papers)
+    diversified: List[Paper] = []
+    per_source_counts: Dict[str, int] = {}
+
+    while remaining and (limit is None or len(diversified) < limit):
+        best_idx = 0
+        best_value = float("-inf")
+        for idx, paper in enumerate(remaining):
+            source_name = str(paper.source or "").strip()
+            same_source_penalty = 0.24 * per_source_counts.get(source_name, 0)
+            effective_score = float(paper.score) - same_source_penalty
+            if effective_score > best_value:
+                best_idx = idx
+                best_value = effective_score
+        chosen = remaining.pop(best_idx)
+        diversified.append(chosen)
+        source_name = str(chosen.source or "").strip()
+        per_source_counts[source_name] = per_source_counts.get(source_name, 0) + 1
+
+    if limit is None:
+        diversified.extend(remaining)
+    return diversified
+
+
 def _dedupe_papers(papers: Iterable[Paper], query: str, author: str = "") -> List[Paper]:
     best: Dict[str, Paper] = {}
     for paper in papers:
-        key = "||".join(
-            [
-                (paper.doi or "").strip().lower(),
-                (paper.arxiv_id or "").strip().lower(),
-                (paper.title or "").strip().lower(),
-            ]
-        )
+        register_source_observation(paper, source_name=paper.source)
+        key = paper_identity_key(paper)
         if not key.strip("|"):
             continue
-        paper.score = max(paper.score, _relevance_score(paper, query=query, author=author))
+        paper.score = max(float(paper.score or 0.0), compute_fusion_score(paper, query=query, author=author))
         current = best.get(key)
-        if current is None or paper.score > current.score:
+        if current is None:
             best[key] = paper
-    return sorted(
+            continue
+        merge_paper_records(current, paper)
+        current.score = compute_fusion_score(current, query=query, author=author)
+    ranked = sorted(
         best.values(),
-        key=lambda item: (item.score, item.citations, item.year or 0),
+        key=lambda item: (
+            item.score,
+            int((item.metadata or {}).get(FUSION_SOURCE_COUNT_KEY, 1) or 1),
+            item.citations,
+            item.year or 0,
+        ),
         reverse=True,
     )
+    return diversify_ranked_papers(ranked)
 
 
 @dataclass(slots=True)
@@ -151,14 +429,12 @@ class ArxivAdapter(AcademicSourceAdapter):
     source_name = "arxiv"
 
     def search(self, request: SearchRequest) -> List[Paper]:
-        search_query = request.query
-        if request.author:
-            search_query = f"all:{request.query} AND au:{request.author}"
+        search_query = _build_arxiv_search_query(request.query, request.author)
         params = {
             "search_query": search_query,
             "start": 0,
             "max_results": min(max(request.max_results * 3, 1), 50),
-            "sortBy": "submittedDate",
+            "sortBy": "relevance",
             "sortOrder": "descending",
         }
         try:
@@ -868,6 +1144,8 @@ class LiteratureSearchService:
                     platforms=[platform],
                 )
             )
+            for rank, paper in enumerate(source_papers):
+                register_source_observation(paper, source_name=paper.source or platform, source_rank=rank)
             papers.extend(source_papers)
             source_breakdown[platform] = len(source_papers)
         ranked = _dedupe_papers(papers, query=rewritten, author=request.author)
@@ -893,6 +1171,8 @@ class LiteratureSearchService:
                 platforms=[source_name],
             )
         )
+        for rank, paper in enumerate(papers):
+            register_source_observation(paper, source_name=paper.source or source_name, source_rank=rank)
         return _dedupe_papers(papers, query=rewritten, author=request.author)[: request.max_results]
 
     def _normalize_platform(self, value: str) -> str:
