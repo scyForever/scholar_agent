@@ -393,7 +393,7 @@ class SearchAgent:
                 self._merge_papers(
                     aggregated,
                     papers,
-                    query=str(artifact.get("query") or ""),
+                    query=rewritten,
                 )
             if used and tool_name not in selected_tools:
                 selected_tools.append(tool_name)
@@ -656,7 +656,7 @@ class SearchAgent:
                 self._merge_papers(
                     aggregated,
                     papers,
-                    query=rewritten,
+                    query=str(artifact.get("query") or ""),
                 )
 
         return {

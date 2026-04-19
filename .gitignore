@@ -225,3 +225,4 @@ api_keys.py
 secrets/
 config/secrets/
 projects/
+tests/
