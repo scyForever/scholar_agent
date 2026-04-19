@@ -19,6 +19,7 @@ DEFAULT_TEMPLATES: Dict[str, str] = {
     ),
     "survey_writer": (
         "请根据给定材料生成一篇结构化综述，包含标题、摘要、正文和参考文献。\n"
+        "请严格遵守材料中的写作约束，尤其是语言、组织方式、必含章节、参考文献数量和引用格式。\n"
         "主题：{topic}\n材料：{materials}"
     ),
     "paper_answer_writer": (

@@ -139,6 +139,7 @@ class MultiAgentPipeline:
         answer = self.coordinator.write_agent.run(
             state["intent"],
             state["query"],
+            state.get("slots") or {},
             state.get("research_plan"),
             state.get("search_result"),
             state.get("analyses") or [],
@@ -220,6 +221,7 @@ class MultiAgentPipeline:
                 artifacts["answer"] = self.coordinator.write_agent.run(
                     state["intent"],
                     state["query"],
+                    state.get("slots") or {},
                     research_plan,
                     search_result,
                     analyses,

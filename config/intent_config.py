@@ -47,7 +47,16 @@ INTENT_SPECS: Dict[str, IntentSpec] = {
         name="generate_survey",
         description="围绕指定主题生成论文综述或研究现状总结。",
         required_slots=["topic"],
-        optional_slots=["time_range", "max_papers", "language", "outline_depth"],
+        optional_slots=[
+            "time_range",
+            "max_papers",
+            "min_references",
+            "language",
+            "outline_depth",
+            "organization_style",
+            "required_sections",
+            "citation_style",
+        ],
     ),
     "generate_code": IntentSpec(
         name="generate_code",

@@ -21,6 +21,7 @@ class WriteAgent:
         self,
         intent: str,
         query: str,
+        slots: dict[str, Any] | None,
         research_plan: ResearchPlan | None,
         search_result: SearchResult | None,
         analyses: List[PaperAnalysis],
@@ -35,10 +36,18 @@ class WriteAgent:
                 )
             answer = "\n".join(lines)
         else:
-            materials = self._compose_materials(research_plan, search_result, analyses, debate)
+            slots = dict(slots or {})
+            topic = str(slots.get("topic") or slots.get("paper_title") or query)
+            materials = self._compose_materials(
+                research_plan,
+                search_result,
+                analyses,
+                debate,
+                slots,
+            )
             template_name, purpose = self._writer_profile(intent)
             prompt = self.templates.render(
-                template_name, topic=query, materials=materials
+                template_name, topic=topic, materials=materials
             )
             stage_token = self.llm.bind_stage("write")
             try:
@@ -71,8 +80,13 @@ class WriteAgent:
         search_result: SearchResult | None,
         analyses: List[PaperAnalysis],
         debate: DebateResult | None,
+        slots: dict[str, Any] | None = None,
     ) -> str:
         parts: List[str] = []
+        constraint_block = self._writing_constraints(slots or {})
+        if constraint_block:
+            parts.append("写作约束：")
+            parts.extend(f"- {line}" for line in constraint_block)
         if research_plan is not None:
             parts.append("研究计划：")
             parts.append(f"- 目标：{research_plan.objective}")
@@ -110,6 +124,57 @@ class WriteAgent:
             parts.append("\n辩论综合：")
             parts.append(debate.synthesis)
         return "\n".join(parts)
+
+    def _writing_constraints(self, slots: dict[str, Any]) -> List[str]:
+        constraints: List[str] = []
+        language_map = {
+            "zh": "输出语言使用中文。",
+            "en": "输出语言使用英文。",
+            "bilingual": "输出语言使用中英双语。",
+        }
+        outline_map = {
+            "deep": "写作深度要求：详细、系统、尽量全面。",
+            "brief": "写作深度要求：简洁概览、控制篇幅。",
+        }
+        organization_map = {
+            "timeline": "正文组织方式：按时间线或发展脉络展开。",
+            "topic": "正文组织方式：按主题线或研究问题展开。",
+            "method": "正文组织方式：按方法线或技术路线展开。",
+            "application": "正文组织方式：按应用场景展开。",
+        }
+        citation_style_map = {
+            "apa": "参考文献格式使用 APA。",
+            "mla": "参考文献格式使用 MLA。",
+            "ieee": "参考文献格式使用 IEEE。",
+            "chicago": "参考文献格式使用 Chicago。",
+            "gb_t_7714": "参考文献格式使用 GB/T 7714。",
+        }
+
+        min_references = int(slots.get("min_references") or 0)
+        if min_references > 0:
+            constraints.append(f"参考文献数量要求：不少于 {min_references} 篇。")
+
+        language = str(slots.get("language") or "")
+        if language in language_map:
+            constraints.append(language_map[language])
+
+        outline_depth = str(slots.get("outline_depth") or "")
+        if outline_depth in outline_map:
+            constraints.append(outline_map[outline_depth])
+
+        organization_style = str(slots.get("organization_style") or "")
+        if organization_style in organization_map:
+            constraints.append(organization_map[organization_style])
+
+        required_sections = slots.get("required_sections") or []
+        if required_sections:
+            constraints.append("必须包含以下章节或部分：" + "、".join(str(item) for item in required_sections if str(item).strip()) + "。")
+
+        citation_style = str(slots.get("citation_style") or "")
+        if citation_style in citation_style_map:
+            constraints.append(citation_style_map[citation_style])
+
+        return constraints
 
     def _chunk_content(self, chunk: Any) -> str:
         if hasattr(chunk, "content"):

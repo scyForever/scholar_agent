@@ -6,6 +6,7 @@ from src.agents.research_agents import ResearchMemoryAgent, ResearchReadingAgent
 from src.core.llm import LLMManager
 from src.core.models import Paper, PaperAnalysis
 from src.prompt_templates.manager import PromptTemplateManager
+from src.tools.research_search_tool import FUSION_SOURCE_COUNT_KEY
 from src.whitebox.tracer import WhiteboxTracer
 
 
@@ -36,11 +37,14 @@ class AnalyzeAgent:
         capped = 5 if max_items is None else max(0, min(max_items, 5))
         selected_papers = papers[:capped]
         resolved_slots = dict(slots or {})
+        prioritized_papers = self._prioritize_papers_for_analysis(papers, resolved_slots)
+        selected_papers = [item["paper"] for item in prioritized_papers[:capped]]
         pdf_path = str(resolved_slots.get("pdf_path") or "")
         focus = str(resolved_slots.get("focus") or "")
         stage_token = self.llm.bind_stage("analyze")
         try:
-            for paper in selected_papers:
+            for item in prioritized_papers[:capped]:
+                paper = item["paper"]
                 deep_context = ""
                 if pdf_path and self.reading_agent is not None:
                     reading_payload = self.reading_agent.build_analysis_context(
@@ -66,7 +70,10 @@ class AnalyzeAgent:
                     title=paper.title,
                     abstract=paper.abstract,
                     context=(
-                        f"来源：{paper.source}, 年份：{paper.year}, 引用数：{paper.citations}"
+                        "证据优先级："
+                        + self._priority_summary(item)
+                        + "\n"
+                        + f"来源：{paper.source}, 年份：{paper.year}, 引用数：{paper.citations}"
                         + (f"\n{deep_context}" if deep_context else "")
                     ),
                 )
@@ -101,6 +108,14 @@ class AnalyzeAgent:
                 "analysis_limit": capped,
                 "deep_read_used": bool(pdf_path),
                 "focus": focus,
+                "evidence_priority": [
+                    {
+                        "title": item["paper"].title,
+                        "score": round(float(item["score"]), 3),
+                        "reasons": list(item["reasons"]),
+                    }
+                    for item in prioritized_papers[:capped]
+                ],
             },
         )
         return analyses
@@ -112,3 +127,105 @@ class AnalyzeAgent:
             if keyword in clean:
                 lines.append(clean)
         return lines[:5]
+
+    def _prioritize_papers_for_analysis(
+        self,
+        papers: List[Paper],
+        slots: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        prioritized = []
+        for paper in papers:
+            score, reasons = self._paper_evidence_priority(paper, slots)
+            prioritized.append(
+                {
+                    "paper": paper,
+                    "score": score,
+                    "reasons": reasons,
+                }
+            )
+        prioritized.sort(
+            key=lambda item: (
+                float(item["score"]),
+                float(item["paper"].score or 0.0),
+                int(item["paper"].citations or 0),
+                int(item["paper"].year or 0),
+            ),
+            reverse=True,
+        )
+        return prioritized
+
+    def _paper_evidence_priority(
+        self,
+        paper: Paper,
+        slots: Dict[str, Any],
+    ) -> tuple[float, List[str]]:
+        score = float(paper.score or 0.0) * 3.0
+        reasons: List[str] = []
+        metadata = dict(paper.metadata or {})
+        abstract_text = str(paper.abstract or "").strip()
+        text_blob = f"{paper.title} {paper.abstract}".lower()
+        full_text_ready = bool((paper.pdf_url or paper.full_text_url or paper.html_url or "").strip())
+        source_count = max(int(metadata.get(FUSION_SOURCE_COUNT_KEY, 1) or 1), 1)
+        outline_depth = str(slots.get("outline_depth") or "").strip()
+        organization_style = str(slots.get("organization_style") or "").strip()
+        required_sections = [
+            str(item).strip()
+            for item in (slots.get("required_sections") or [])
+            if str(item).strip()
+        ]
+
+        if abstract_text:
+            score += 1.0
+            reasons.append("摘要完整")
+        if len(abstract_text) >= 180:
+            score += 0.4
+        if full_text_ready:
+            score += 1.5
+            reasons.append("可直达全文或 PDF")
+        if paper.open_access:
+            score += 0.8
+            reasons.append("开放获取")
+        if source_count > 1:
+            score += min(source_count, 3) * 0.6
+            reasons.append("跨源合并后元数据更完整")
+        if paper.year is not None:
+            score += 0.3
+        score += min(int(paper.citations or 0), 200) / 80.0
+
+        if outline_depth == "deep":
+            if full_text_ready:
+                score += 1.2
+            score += 0.6 if len(abstract_text) >= 240 else 0.0
+            reasons.append("详细写作优先深证据论文")
+
+        if required_sections:
+            if full_text_ready:
+                score += 1.0
+            if self._contains_any(text_blob, ["survey", "review", "overview", "taxonomy", "benchmark", "挑战", "综述"]):
+                score += 0.8
+                reasons.append("更适合支撑综述章节组织")
+
+        if organization_style == "timeline" and paper.year is not None:
+            score += 0.9
+            reasons.append("时间线组织需要年份锚点")
+        elif organization_style == "method" and self._contains_any(text_blob, ["method", "framework", "architecture", "approach", "model", "algorithm"]):
+            score += 0.8
+            reasons.append("方法线组织优先方法型论文")
+        elif organization_style == "application" and self._contains_any(text_blob, ["application", "case study", "benchmark", "dataset", "deployment"]):
+            score += 0.8
+            reasons.append("应用线组织优先场景型论文")
+        elif organization_style == "topic" and self._contains_any(text_blob, ["survey", "review", "overview", "taxonomy"]):
+            score += 0.5
+            reasons.append("主题线组织优先综述性论文")
+
+        return score, list(dict.fromkeys(reasons))
+
+    def _priority_summary(self, item: Dict[str, Any]) -> str:
+        reasons = [str(reason).strip() for reason in item.get("reasons") or [] if str(reason).strip()]
+        if not reasons:
+            return f"综合优先级 {float(item.get('score') or 0.0):.2f}"
+        return f"综合优先级 {float(item.get('score') or 0.0):.2f}；" + "；".join(reasons[:4])
+
+    def _contains_any(self, text: str, keywords: List[str]) -> bool:
+        lowered = str(text or "").lower()
+        return any(str(keyword).lower() in lowered for keyword in keywords if str(keyword).strip())

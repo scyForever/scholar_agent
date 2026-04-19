@@ -229,6 +229,8 @@ print(response.answer)
 11. 通过相关性判断做 CRAG 风格校验
 12. 若本地结果不足，再补外部网页或学术搜索结果
 13. 外部学术搜索内部会先做 source 内排序，再做跨源去重、字段合并、融合打分与来源多样性重排，避免 `OpenAlex` 这类高引用源长期压制 `arXiv`
+14. 若当前是综述类请求，`SearchAgent` 会根据 `min_references / outline_depth / required_sections / organization_style` 动态扩大本地 RAG 和外部检索预算，并把预算原因写入 `search_result.trace.constraint_budget`
+15. `AnalyzeAgent` 不再直接吃检索结果前几条，而是按证据优先级重排，优先选择更容易支撑综述写作的论文，例如摘要更完整、可获取全文、跨源信息更完整的记录
 
 ### 6.3 写作流程
 

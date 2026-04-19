@@ -41,6 +41,13 @@ REQUEST_SUFFIXES = (
 
 CHINESE_RE = re.compile(r"[\u4e00-\u9fff]")
 TIME_RANGE_RE = re.compile(r"(近|最近)\s*[一二两三四五六七八九十\d]+\s*年|(20\d{2})\s*[-到至]\s*(20\d{2})")
+WRITING_REQUIREMENT_RE = re.compile(
+    r"(?:[,，;；]\s*|(?<!\S))(?:要求|需要|需|并要求|且要求|并且要求|并需|同时要求|同时需要).*$"
+)
+REFERENCE_REQUIREMENT_RE = re.compile(
+    r"(?:[,，;；]\s*)?(?:使用|包含|含|带|附带|给出)?\s*(?:不少于|不低于|至少|最少|超过|多于)?\s*"
+    r"(?:[一二两三四五六七八九十\d]+)\s*篇?\s*(?:参考文献|引用|文献)\s*$"
+)
 
 TERM_TRANSLATIONS = {
     "多智能体强化学习": "multi-agent reinforcement learning",
@@ -87,6 +94,13 @@ def _normalize_spaces(text: str) -> str:
     )
 
 
+def _strip_writing_requirements(text: str) -> str:
+    cleaned = WRITING_REQUIREMENT_RE.sub("", _normalize_spaces(text))
+    cleaned = REFERENCE_REQUIREMENT_RE.sub("", cleaned)
+    cleaned = re.sub(r"(?:[,，;；]\s*)+$", "", cleaned)
+    return " ".join(cleaned.split())
+
+
 @dataclass(slots=True)
 class QueryRewritePlan:
     core_topic: str
@@ -107,7 +121,7 @@ class QueryRewriter:
         return self.extract_core_topic(topic)
 
     def extract_core_topic(self, topic: str) -> str:
-        cleaned = _normalize_spaces(topic.strip(" ，。；;,."))
+        cleaned = _strip_writing_requirements(topic.strip(" ，。；;,."))
         for prefix in REQUEST_PREFIXES:
             if cleaned.startswith(prefix):
                 cleaned = cleaned[len(prefix):].strip()
@@ -115,6 +129,7 @@ class QueryRewriter:
             if cleaned.endswith(suffix):
                 cleaned = cleaned[: -len(suffix)].strip()
         cleaned = TIME_RANGE_RE.sub("", cleaned).strip()
+        cleaned = _strip_writing_requirements(cleaned)
         cleaned = re.sub(r"^(关于|有关)\s*", "", cleaned).strip()
         cleaned = re.sub(r"\s*(方面|领域|方向)$", "", cleaned)
         cleaned = re.sub(r"\s*的$", "", cleaned)
@@ -138,7 +153,7 @@ class QueryRewriter:
         return plan.english_query or plan.core_topic or _normalize_spaces(query)
 
     def _rewrite_plan(self, query: str, intent: str) -> QueryRewritePlan:
-        normalized_query = _normalize_spaces(query.strip())
+        normalized_query = _strip_writing_requirements(query.strip())
         cache_key = (normalized_query, intent)
         cached = self._rewrite_cache.get(cache_key)
         if cached is not None:

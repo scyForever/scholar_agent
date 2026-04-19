@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import asdict
 import json
+import math
 from typing import Any, Dict, List
 
 from src.agents.research_agents import ResearchSearchAgent
@@ -61,7 +62,13 @@ class SearchAgent:
     ) -> SearchResult:
         topic = str(slots.get("topic") or slots.get("paper_title") or query)
         time_range = str(slots.get("time_range") or "")
-        max_results = int(slots.get("max_papers") or 12)
+        requested_max_results = int(slots.get("max_papers") or 12)
+        search_budget = self._resolve_search_budget(
+            intent=intent,
+            slots=slots,
+            requested_max_results=requested_max_results,
+        )
+        max_results = search_budget["final_limit"]
         context_source = str(slots.get("context_source") or "")
         rag_mode = str(slots.get("rag_mode") or "auto")
         if context_source == "previous_search" and prior_search_result is not None:
@@ -77,6 +84,7 @@ class SearchAgent:
                     "context_source": "previous_search",
                     "reused_from_previous_search": True,
                     "original_search_query": prior_search_result.query,
+                    "constraint_budget": search_budget,
                 },
             )
             self.tracer.trace_step(trace_id, "search", {"query": topic}, asdict(result))
@@ -94,6 +102,7 @@ class SearchAgent:
                     "local_rag": {"results": [], "supplement": [], "trace": {"disabled_by_instruction": True}},
                     "search_mode": "disabled_by_instruction",
                     "rag_mode": "off",
+                    "constraint_budget": search_budget,
                 },
             )
             self.tracer.trace_step(trace_id, "search", {"query": topic}, asdict(result))
@@ -101,7 +110,7 @@ class SearchAgent:
         local_context = self.retriever.retrieve(
             topic,
             history,
-            top_k=5,
+            top_k=search_budget["local_top_k"],
             rewritten_queries=rewrite_plan.local_queries,
             rewrite_plan=rewrite_plan,
         )
@@ -117,6 +126,7 @@ class SearchAgent:
                     "local_rag": local_context,
                     "search_mode": "local_rag_only_by_instruction",
                     "rag_mode": "local_only",
+                    "constraint_budget": search_budget,
                 },
             )
             self.tracer.trace_step(trace_id, "search", {"query": topic}, asdict(result))
@@ -128,7 +138,11 @@ class SearchAgent:
                 total_found=0,
                 source_breakdown={"local_rag": len(local_context["results"])},
                 rewritten_queries=rewritten_queries,
-                trace={"local_rag": local_context, "search_mode": "local_rag_only"},
+                trace={
+                    "local_rag": local_context,
+                    "search_mode": "local_rag_only",
+                    "constraint_budget": search_budget,
+                },
             )
             self.tracer.trace_step(trace_id, "search", {"query": topic}, asdict(result))
             return result
@@ -147,7 +161,7 @@ class SearchAgent:
             topic=topic,
             intent=intent,
             time_range=time_range,
-            max_results=max_results,
+            max_results=search_budget["external_limit"],
             rewritten_queries=rewritten_queries,
             allowed_tool_names=prioritized_tool_names,
         )
@@ -204,10 +218,87 @@ class SearchAgent:
                 "agent_provider_attempts": search_payload["provider_attempts"],
                 "agent_errors": search_payload["agent_errors"],
                 "memory_ranking": memory_trace,
+                "constraint_budget": search_budget,
             },
         )
         self.tracer.trace_step(trace_id, "search", {"query": topic}, asdict(result))
         return result
+
+    def _resolve_search_budget(
+        self,
+        *,
+        intent: str,
+        slots: Dict[str, Any],
+        requested_max_results: int,
+    ) -> Dict[str, Any]:
+        requested_limit = max(int(requested_max_results or 0), 1)
+        final_limit = requested_limit
+        external_limit = requested_limit
+        local_top_k = 5
+        reasons: List[str] = []
+
+        min_references = max(int(slots.get("min_references") or 0), 0)
+        outline_depth = str(slots.get("outline_depth") or "").strip()
+        organization_style = str(slots.get("organization_style") or "").strip()
+        required_sections = [
+            str(item).strip()
+            for item in (slots.get("required_sections") or [])
+            if str(item).strip()
+        ]
+
+        if intent == "generate_survey" and final_limit < 16:
+            final_limit = 16
+            reasons.append("综述任务默认扩大最终候选规模到至少 16 篇")
+
+        if min_references > 0:
+            bounded_min_references = min(min_references, 40)
+            if bounded_min_references > final_limit:
+                final_limit = bounded_min_references
+                reasons.append(f"为满足不少于 {bounded_min_references} 篇参考文献，提升最终候选规模")
+
+        if outline_depth == "deep":
+            if final_limit < 18:
+                final_limit = 18
+                reasons.append("详细综述需要更多候选论文支撑写作")
+            external_limit += 6
+            local_top_k += 2
+
+        if required_sections:
+            external_limit += min(len(required_sections), 4)
+            local_top_k += 1
+            reasons.append("指定章节需要更广的证据覆盖")
+
+        if organization_style == "timeline":
+            external_limit += 3
+            reasons.append("按时间线组织需要更宽的年份覆盖")
+        elif organization_style in {"topic", "method", "application"}:
+            external_limit += 2
+            reasons.append("按主线分组写作需要更多可聚类候选")
+
+        if min_references >= 20:
+            external_limit += min(8, max(2, math.ceil(min_references / 5)))
+            local_top_k += 1
+
+        external_limit = max(external_limit, final_limit + (3 if intent == "generate_survey" else 0))
+        external_limit = min(external_limit, 50)
+        local_top_k = min(max(local_top_k, 5), 10)
+
+        return {
+            "requested_limit": requested_limit,
+            "final_limit": final_limit,
+            "external_limit": external_limit,
+            "local_top_k": local_top_k,
+            "min_references": min_references,
+            "outline_depth": outline_depth,
+            "organization_style": organization_style,
+            "required_sections": required_sections,
+            "reasons": list(dict.fromkeys(reasons)),
+        }
+
+    def _resolve_per_tool_max_results(self, *, external_limit: int, tool_count: int) -> int:
+        effective_tool_count = max(int(tool_count or 0), 1)
+        per_tool = math.ceil(max(int(external_limit or 0), 1) / effective_tool_count) + 2
+        return min(max(per_tool, 4), 18)
 
     def _run_external_search(
         self,
@@ -368,14 +459,18 @@ class SearchAgent:
         aggregated: Dict[str, Paper] = {}
         tool_calls: List[Dict[str, Any]] = []
         selected_tools: List[str] = []
-        candidate_queries = rewritten_queries[:2] if len(tool_names) >= 4 else rewritten_queries[:3]
+        per_tool_max_results = self._resolve_per_tool_max_results(
+            external_limit=max_results,
+            tool_count=len(tool_names),
+        )
+        candidate_queries = rewritten_queries[:3] if max_results >= 18 else rewritten_queries[:2] if len(tool_names) >= 4 else rewritten_queries[:3]
         for tool_name in tool_names:
             used = False
             for rewritten in candidate_queries:
                 papers = self._invoke_search_tool(
                     tool_name,
                     query=rewritten,
-                    max_results=max_results // max(len(tool_names), 1) + 2,
+                    max_results=per_tool_max_results,
                     time_range=time_range,
                     use_langchain=False,
                 )
@@ -383,7 +478,7 @@ class SearchAgent:
                     {
                         "tool_name": tool_name,
                         "query": rewritten,
-                        "max_results": max_results // max(len(tool_names), 1) + 2,
+                        "max_results": per_tool_max_results,
                         "time_range": time_range,
                         "count": len(papers),
                     }
