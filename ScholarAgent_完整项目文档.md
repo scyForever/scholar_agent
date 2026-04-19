@@ -844,6 +844,83 @@ python verify_agentic_search.py
 - LangChain agent 搜索路径
 - 真实 provider 的可用性
 
+### 9.4 自建评测数据集与评测脚本
+
+项目另外提供了一套围绕“学术研究助手”目标构建的自建评测集，而不是只问项目内部实现细节。
+
+评测文件：
+
+- `data/evaluation/rag_eval_corpus.json`
+- `data/evaluation/retrieval_eval_dataset.json`
+- `data/evaluation/generation_eval_dataset.json`
+- `data/evaluation/agent_eval_dataset.json`
+- `src/evaluation/dataset_builder.py`
+- `src/evaluation/runner.py`
+- `run_evaluation.py`
+
+设计原则：
+
+- 语料层使用自建论文知识库，当前默认生成 `120` 篇模拟论文
+- 检索评测关注“是否找对上下文”
+- 生成评测关注“在给定金标准上下文后，回答是否真实、相关且忠于证据”
+- Agent 评测关注“任务有没有做成、流程是否按预期执行、功能是否匹配、重复运行是否稳定”
+- retrieval case 采用 `48` 条 exact title、`36` 条 semantic pair、`36` 条 semantic triple 的混合结构，用来把 `precision_at_k` 拉成多档分布
+- `metric_judge_mode` 支持 `provider / auto / rule`
+  - `provider`：优先使用已配置 provider 的大模型 API 为 `context_relevance`、生成三项指标和 agent 语义回答质量打分
+  - `auto`：有健康 provider 时走大模型裁判，否则回退规则分
+  - `rule`：只使用本地规则分，适合离线稳定回归
+
+检索指标包括：
+
+- `recall_at_k`
+- `precision_at_k`
+- `context_relevance`
+
+生成指标包括：
+
+- `faithfulness`
+- `answer_truthfulness`
+- `answer_relevance`
+
+Agent 指标包括：
+
+- `task_success_rate`
+- `function_match_score`
+- `process_metrics`
+- `performance_stability`
+
+其中 `process_metrics` 还会细分：
+
+- 意图匹配
+- 槽位覆盖
+- 槽位值匹配
+- trace 步骤覆盖
+- 本地知识库命中数
+- 是否产出约束驱动的检索预算
+- 是否产出证据优先级
+
+每个报告都会额外写出指标计算公式，方便审计分数来源。
+
+运行方式：
+
+```bash
+source /home/a1/miniconda3/etc/profile.d/conda.sh
+conda activate agent
+python run_evaluation.py --rebuild-datasets
+python run_evaluation.py --suite retrieval --metric-judge-mode provider
+python run_evaluation.py --suite generation --answer-source oracle --metric-judge-mode provider
+python run_evaluation.py --suite agent --repeats 1 --agent-llm-mode mock
+```
+
+说明：
+
+- `agent` 套件默认建议使用 `mock` 模式，保证评测更稳定、更可复现
+- retrieval case 的默认 `top_k` 已经按 `1 / 2 / 3` 三档设计，不建议再统一覆盖 `--top-k 4`
+- 如需让 `context_relevance`、生成指标和 agent 语义项走真实大模型裁判，使用 `--metric-judge-mode provider`
+- 若要离线稳定回归或控制 API 成本，可切换为 `--metric-judge-mode rule`
+- 如需观察真实模型生成效果，可以改为 `--agent-llm-mode auto`
+- 报告输出在 `reports/evaluation/`，包括 `retrieval_report.json`、`generation_report.json`、`agent_report.json` 和组合报告 `rag_report.json`
+
 ---
 
 ## 10. 当前边界与后续演进方向

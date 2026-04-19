@@ -226,3 +226,5 @@ secrets/
 config/secrets/
 projects/
 tests/
+nohup*
+*.json

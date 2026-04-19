@@ -54,3 +54,25 @@ class SearchAgentFinalOutput(BaseModel):
         default_factory=SearchAgentAggregationOutput,
         description="对聚合检索结果的结构化总结。",
     )
+
+
+class EvaluationMetricScore(BaseModel):
+    score: float = Field(default=0.0, ge=0.0, le=1.0, description="单项评分，范围 0 到 1。")
+    reason: str = Field(default="", description="给出该项评分的简短理由。")
+
+
+class GenerationEvaluationOutput(BaseModel):
+    faithfulness: EvaluationMetricScore = Field(default_factory=EvaluationMetricScore)
+    answer_truthfulness: EvaluationMetricScore = Field(default_factory=EvaluationMetricScore)
+    answer_relevance: EvaluationMetricScore = Field(default_factory=EvaluationMetricScore)
+    summary: str = Field(default="", description="总体评价摘要。")
+
+
+class RetrievalEvaluationOutput(BaseModel):
+    context_relevance: EvaluationMetricScore = Field(default_factory=EvaluationMetricScore)
+    summary: str = Field(default="", description="总体评价摘要。")
+
+
+class AgentSemanticEvaluationOutput(BaseModel):
+    answer_quality: EvaluationMetricScore = Field(default_factory=EvaluationMetricScore)
+    summary: str = Field(default="", description="总体评价摘要。")

@@ -156,6 +156,28 @@ python verify_agentic_search.py
 - 搜索规划当前优先尝试 `zhipu`
 - 若没有已验证成功的规划 provider，运行时会自动降级为确定性搜索，不会阻塞整条链路
 
+自建评测脚本：
+
+```bash
+python run_evaluation.py --rebuild-datasets
+python run_evaluation.py --suite retrieval --metric-judge-mode provider
+python run_evaluation.py --suite generation --answer-source oracle --metric-judge-mode provider
+python run_evaluation.py --suite agent --repeats 1 --agent-llm-mode mock
+```
+
+说明：
+
+- 评测语料位于 `data/evaluation/`，当前默认会生成 `120` 篇模拟论文、`120` 条检索 case、`120` 条生成 case 和 `100` 条 agent case。
+- 检索过程和生成过程已经拆开评测：
+  - `retrieval_eval_dataset.json` 评测 `recall_at_k`、`precision_at_k`、`context_relevance`
+  - `generation_eval_dataset.json` 在金标准上下文上评测 `faithfulness`、`answer_truthfulness`、`answer_relevance`
+  - `agent_eval_dataset.json` 评测任务成功率、过程指标、性能稳定性与功能匹配度
+- `retrieval_eval_dataset.json` 不再全是单篇精确命中题，而是混合了 `48` 条 exact title case、`36` 条 semantic pair case 和 `36` 条 semantic triple case，用来把 `precision_at_k` 拉成多档，而不是普遍卡在 `0.25`。
+- `--metric-judge-mode provider` 会调用已配置 provider 的大模型 API 为 `context_relevance`、`faithfulness`、`answer_truthfulness`、`answer_relevance` 以及 agent 语义回答质量打分；如果 provider 不可用，会自动回退规则分。离线稳定回归可改为 `--metric-judge-mode rule`。
+- `agent` 套件默认使用 `--agent-llm-mode mock`，避免评测过程被远程 provider 超时影响；如果你要联通真实模型观察生成质量，可改为 `--agent-llm-mode auto`。
+- `rag_report.json` 现在是组合报告，另外会单独输出 `retrieval_report.json`、`generation_report.json` 和 `agent_report.json`。
+- 详细说明见 [docs/评测数据集与脚本.md](/media/a1/16T/lcy/scholar_agent/docs/评测数据集与脚本.md)。
+
 ## 5. 使用示例
 
 ### 5.1 命令行问答
