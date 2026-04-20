@@ -82,16 +82,24 @@ class AppSettings:
 
 def _provider_defaults() -> Dict[str, Dict[str, Any]]:
     return {
+        # "scnet": {
+        #     "priority": 4,
+        #     "model": os.getenv("SCNET_MODEL", "MiniMax-M2.5"),
+        #     "base_url": os.getenv(
+        #         "SCNET_BASE_URL", "https://api.scnet.cn/api/llm/v1/chat/completions"
+        #     ),
+        #     "api_key_name": "SCNET_API_KEY",
+        # },
         "scnet": {
             "priority": 4,
-            "model": os.getenv("SCNET_MODEL", "MiniMax-M2.5"),
+            "model": os.getenv("SCNET_MODEL", "qwen/qwen3.6-plus-preview:free"),
             "base_url": os.getenv(
-                "SCNET_BASE_URL", "https://api.scnet.cn/api/llm/v1/chat/completions"
+                "SCNET_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"
             ),
             "api_key_name": "SCNET_API_KEY",
         },
         "siliconflow": {
-            "priority": 3,
+            "priority": 4,
             "model": os.getenv("SILICONFLOW_MODEL", "Pro/moonshotai/Kimi-K2.5"),
             "base_url": os.getenv(
                 "SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1/chat/completions"

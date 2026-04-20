@@ -6,9 +6,10 @@ from typing import Any, Callable, Dict
 
 from src.agents.multi_agent import MultiAgentCoordinator
 from src.core.llm import LLMManager
-from src.core.models import AgentResponse, ExecutionMode, MemoryType
+from src.core.models import AgentResponse, ExecutionMode, MemoryType, SearchResult
 from src.feedback.collector import FeedbackCollector
 from src.memory.manager import MemoryManager
+from src.pipeline import AgentRuntimeGraph
 from src.planning.task_hierarchy import TaskHierarchyPlanner
 from src.preprocessing.dialogue_manager import DialogueManager
 from src.preprocessing.intent_classifier import IntentClassifier
@@ -17,6 +18,7 @@ from src.prompt_templates.manager import PromptTemplateManager
 from src.quality.enhancer import QualityEnhancer
 from src.rag.retriever import HybridRetriever
 from src.reasoning.engine import ReasoningEngine
+from src.skills import ResearchSkillset
 from src.whitelist.manager import WhitelistManager
 from src.whitebox.tracer import WhiteboxTracer
 
@@ -35,7 +37,12 @@ class AgentV2:
         self.slot_filler = SlotFiller()
         self.planner = TaskHierarchyPlanner()
         self.retriever = HybridRetriever(llm=self.llm)
-        self.reasoning = ReasoningEngine(self.llm, self.tracer)
+        self.reasoning = ReasoningEngine(
+            self.llm,
+            self.tracer,
+            retriever=self.retriever,
+            whitelist=self.whitelist,
+        )
         self.quality = QualityEnhancer(self.llm)
         self.multi_agent = MultiAgentCoordinator(
             llm=self.llm,
@@ -44,7 +51,15 @@ class AgentV2:
             reasoning=self.reasoning,
             templates=self.templates,
             tracer=self.tracer,
+            memory_manager=self.memory,
         )
+        self.runtime_graph = AgentRuntimeGraph(
+            multi_agent=self.multi_agent,
+            reasoning=self.reasoning,
+            quality=self.quality,
+            tracer=self.tracer,
+        )
+        self.research_skills = ResearchSkillset(self.memory)
         self.execution_mode = ExecutionMode.STANDARD
         self.enable_quality_enhance = False
 
@@ -67,6 +82,7 @@ class AgentV2:
         on_trace_start: Callable[[str], None] | None = None,
     ) -> AgentResponse:
         state = self.dialogue.get_state(session_id)
+        prior_search_result = state.last_search_result
         self.dialogue.add_user_message(session_id, query)
         trace_id = self.tracer.start_trace(session_id, query, {"mode": self.execution_mode.value})
         if on_trace_start is not None:
@@ -130,58 +146,24 @@ class AgentV2:
                 },
             )
 
-            artifacts = self.multi_agent.execute(
+            runtime_result = self.runtime_graph.execute(
                 query=query,
                 intent=intent,
                 slots=slots,
-                mode=self.execution_mode,
+                session_id=session_id,
                 trace_id=trace_id,
                 task_config=config,
                 history=self.dialogue.get_state(session_id).history,
+                memory_context=memory_context,
+                prior_search_result=prior_search_result,
+                execution_mode=self.execution_mode,
+                enable_quality_enhance=self.enable_quality_enhance,
             )
-            answer = str(artifacts.get("answer") or "")
-
-            if not answer:
-                reasoning = self.reasoning.reason(
-                    query,
-                    memory_context,
-                    mode="auto",
-                    trace_id=trace_id,
-                    preferred_modes=config.reasoning_modes,
-                )
-                answer = reasoning.answer
-                artifacts["reasoning"] = reasoning
-
-            if self.enable_quality_enhance and self.execution_mode == ExecutionMode.FULL:
-                base_answer = answer
-                try:
-                    moa_result = self.quality.self_moa(query, answer)
-                    verification = self.quality.mpsc_verify(query, moa_result.answer)
-                    answer = moa_result.answer
-                    artifacts["moa"] = moa_result
-                    artifacts["verification"] = verification
-                    self.tracer.trace_step(
-                        trace_id,
-                        "quality",
-                        {"query": query},
-                        {
-                            "verification": verification.verdict,
-                            "moa_errors": moa_result.errors,
-                            "verification_errors": verification.errors,
-                        },
-                    )
-                except Exception as exc:
-                    answer = base_answer
-                    artifacts["quality_error"] = f"{type(exc).__name__}: {exc}"
-                    self.tracer.trace_step(
-                        trace_id,
-                        "quality",
-                        {"query": query},
-                        {
-                            "verification": "failed_but_preserved_answer",
-                            "error": f"{type(exc).__name__}: {exc}",
-                        },
-                    )
+            artifacts = dict(runtime_result.get("artifacts") or {})
+            answer = str(runtime_result.get("answer") or "")
+            latest_search_result = artifacts.get("search_result")
+            if isinstance(latest_search_result, SearchResult):
+                self.dialogue.update_state(session_id, last_search_result=latest_search_result)
 
             self.memory.store(
                 session_id,
@@ -222,10 +204,31 @@ class AgentV2:
     def submit_feedback(self, session_id: str, query: str, response: str, rating: int, comment: str = "") -> None:
         self.feedback.record_feedback(session_id, query, response, rating, comment)
 
+    def plan_research(self, topic: str, *, intent: str = "generate_survey", slots: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return asdict(self.research_skills.planning.plan(topic, intent=intent, slots=slots))
+
+    def fetch_paper(self, identifier: str, *, identifier_type: str = "auto", prefer: str = "pdf", download_dir: str = "") -> Dict[str, Any]:
+        return asdict(
+            self.research_skills.reading.fetch_full_text(
+                identifier,
+                identifier_type=identifier_type,
+                prefer=prefer,
+                download_dir=download_dir,
+            )
+        )
+
+    def read_paper(self, pdf_path: str, *, target_section: str = "") -> Dict[str, Any]:
+        return asdict(self.research_skills.reading.parse_pdf(pdf_path, target_section=target_section))
+
+    def extract_paper_visuals(self, pdf_path: str, *, page_numbers: list[int] | None = None, output_dir: str = "") -> Dict[str, Any]:
+        return self.research_skills.reading.extract_visuals(pdf_path, page_numbers=page_numbers, output_dir=output_dir)
+
     def get_status(self) -> Dict[str, Any]:
         return {
             "mode": self.execution_mode.value,
             "quality_enhance": self.enable_quality_enhance,
+            "runtime_graph": self.runtime_graph.uses_langgraph(),
+            "multi_agent_graph": self.multi_agent.uses_langgraph(),
             "llm_status": self.llm.get_status(),
             "templates": list(self.templates.list_templates()),
         }

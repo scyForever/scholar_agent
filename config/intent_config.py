@@ -35,7 +35,7 @@ INTENT_SPECS: Dict[str, IntentSpec] = {
         name="explain_concept",
         description="解释某个学术概念、术语或方法。",
         required_slots=["topic"],
-        optional_slots=["audience", "language"],
+        optional_slots=["audience", "language", "rag_mode", "context_source"],
     ),
     "compare_methods": IntentSpec(
         name="compare_methods",
@@ -47,7 +47,16 @@ INTENT_SPECS: Dict[str, IntentSpec] = {
         name="generate_survey",
         description="围绕指定主题生成论文综述或研究现状总结。",
         required_slots=["topic"],
-        optional_slots=["time_range", "max_papers", "language", "outline_depth"],
+        optional_slots=[
+            "time_range",
+            "max_papers",
+            "min_references",
+            "language",
+            "outline_depth",
+            "organization_style",
+            "required_sections",
+            "citation_style",
+        ],
     ),
     "generate_code": IntentSpec(
         name="generate_code",

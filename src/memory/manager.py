@@ -13,7 +13,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 from config.settings import settings
-from src.core.models import MemoryRecord, MemoryType
+from src.core.models import MemoryRecord, MemoryType, Paper
 
 
 def _tokenize(text: str) -> List[str]:
@@ -215,3 +215,96 @@ class MemoryManager:
                 )
                 for row in rows
             ]
+
+    def remember_preference(
+        self,
+        user_id: str,
+        preference: str,
+        *,
+        metadata: Dict[str, Any] | None = None,
+        importance: float = 0.85,
+    ) -> str:
+        return self.store(
+            user_id,
+            preference,
+            memory_type=MemoryType.PREFERENCE,
+            metadata=metadata,
+            importance=importance,
+        )
+
+    def remember_paper(
+        self,
+        user_id: str,
+        paper: Paper,
+        summary: str,
+        *,
+        highlights: List[str] | None = None,
+        importance: float = 0.8,
+    ) -> str:
+        content_lines = [
+            f"论文：{paper.title}",
+            f"来源：{paper.source}",
+            f"年份：{paper.year or '未知'}",
+            f"摘要总结：{summary.strip()}",
+        ]
+        if highlights:
+            content_lines.append("核心观点：" + "；".join(item.strip() for item in highlights if item.strip()))
+        return self.store(
+            user_id,
+            "\n".join(content_lines),
+            memory_type=MemoryType.PAPER_SUMMARY,
+            metadata={
+                "paper_id": paper.paper_id,
+                "title": paper.title,
+                "doi": paper.doi,
+                "arxiv_id": paper.arxiv_id,
+                "pmid": paper.pmid,
+                "source": paper.source,
+                "year": paper.year,
+            },
+            importance=importance,
+        )
+
+    def recall_research_context(
+        self,
+        user_id: str,
+        query: str,
+        *,
+        limit: int = 8,
+    ) -> List[MemoryRecord]:
+        records = self.recall(query, user_id=user_id, limit=max(limit * 2, limit))
+        allowed_types = {
+            MemoryType.PREFERENCE,
+            MemoryType.PAPER_SUMMARY,
+            MemoryType.RESEARCH_NOTE,
+            MemoryType.KNOWLEDGE,
+        }
+        filtered = [record for record in records if record.memory_type in allowed_types]
+        return filtered[:limit]
+
+    def seen_paper_keys(self, user_id: str) -> set[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT metadata, content
+                FROM memories
+                WHERE user_id = ? AND type IN (?, ?, ?)
+                """,
+                (
+                    user_id,
+                    MemoryType.PAPER_SUMMARY.value,
+                    MemoryType.RESEARCH_NOTE.value,
+                    MemoryType.KNOWLEDGE.value,
+                ),
+            ).fetchall()
+        keys: set[str] = set()
+        for row in rows:
+            metadata = json.loads(row["metadata"] or "{}")
+            for field in ("paper_id", "title", "doi", "arxiv_id", "pmid"):
+                value = str(metadata.get(field) or "").strip().lower()
+                if value:
+                    keys.add(value)
+            content = str(row["content"] or "").strip().lower()
+            if content:
+                keys.add(content)
+        return keys

@@ -17,6 +17,8 @@ class MemoryType(str, Enum):
     KNOWLEDGE = "knowledge"
     PREFERENCE = "preference"
     FEEDBACK = "feedback"
+    PAPER_SUMMARY = "paper_summary"
+    RESEARCH_NOTE = "research_note"
 
 
 @dataclass(slots=True)
@@ -34,6 +36,87 @@ class Paper:
     categories: List[str] = field(default_factory=list)
     keywords: List[str] = field(default_factory=list)
     score: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    doi: str = ""
+    arxiv_id: str = ""
+    pmid: str = ""
+    pmcid: str = ""
+    full_text_url: str = ""
+    html_url: str = ""
+    open_access: bool = False
+
+
+@dataclass(slots=True)
+class PaperSection:
+    heading: str
+    level: int = 1
+    text: str = ""
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class VisualElement:
+    element_id: str
+    kind: str
+    page: int
+    caption: str = ""
+    text: str = ""
+    latex: str = ""
+    markdown: str = ""
+    image_path: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ParsedDocument:
+    document_id: str
+    source_path: str
+    title: str = ""
+    abstract: str = ""
+    full_text: str = ""
+    page_texts: List[str] = field(default_factory=list)
+    sections: List[PaperSection] = field(default_factory=list)
+    chunks: List[str] = field(default_factory=list)
+    figures: List[VisualElement] = field(default_factory=list)
+    tables: List[VisualElement] = field(default_factory=list)
+    formulas: List[VisualElement] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class PaperAsset:
+    identifier: str
+    source: str
+    asset_type: str
+    url: str = ""
+    local_path: str = ""
+    content: str = ""
+    content_type: str = ""
+    available: bool = False
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ResearchTask:
+    task_id: str
+    title: str
+    goal: str
+    deliverable: str = ""
+    dependencies: List[str] = field(default_factory=list)
+    suggested_tools: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ResearchPlan:
+    topic: str
+    objective: str
+    tasks: List[ResearchTask] = field(default_factory=list)
+    milestones: List[str] = field(default_factory=list)
+    validation: List[str] = field(default_factory=list)
+    risks: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -136,6 +219,7 @@ class DialogueState:
     missing_slots: List[str] = field(default_factory=list)
     history: List[Dict[str, str]] = field(default_factory=list)
     last_trace_id: str = ""
+    last_search_result: Optional[SearchResult] = None
 
 
 @dataclass(slots=True)

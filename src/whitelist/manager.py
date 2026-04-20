@@ -13,9 +13,30 @@ DEFAULT_WHITELIST: Dict[str, List[str]] = {
         "search_openalex",
         "search_semantic_scholar",
         "search_web_of_science",
+        "search_pubmed",
+        "search_ieee_xplore",
+        "search_google_scholar",
+        "search_literature",
         "search_web",
     ],
-    "analyze_agent": ["extract_pdf_text"],
+    "reasoning_agent": [
+        "search_arxiv",
+        "search_openalex",
+        "search_semantic_scholar",
+        "search_web_of_science",
+        "search_pubmed",
+        "search_ieee_xplore",
+        "search_google_scholar",
+        "search_literature",
+        "search_web",
+    ],
+    "analyze_agent": [
+        "extract_pdf_text",
+        "fetch_paper_asset",
+        "parse_pdf_document",
+        "extract_paper_visuals",
+        "read_paper_section",
+    ],
     "debate_agent": [],
     "write_agent": [],
     "coder_agent": [],
@@ -37,7 +58,23 @@ class WhitelistManager:
 
     def load(self) -> Dict[str, List[str]]:
         self._ensure_default()
-        return json.loads(self.whitelist_path.read_text(encoding="utf-8"))
+        payload = json.loads(self.whitelist_path.read_text(encoding="utf-8"))
+        changed = False
+        for agent_name, tools in DEFAULT_WHITELIST.items():
+            if agent_name not in payload:
+                payload[agent_name] = list(tools)
+                changed = True
+                continue
+            merged = list(dict.fromkeys([*payload.get(agent_name, []), *tools]))
+            if merged != payload.get(agent_name, []):
+                payload[agent_name] = merged
+                changed = True
+        if changed:
+            self.whitelist_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        return payload
 
     def allowed_tools(self, agent_name: str) -> List[str]:
         return self.load().get(agent_name, [])
