@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import re
-from typing import Dict
+from typing import Dict, Protocol
 
 from src.core.models import DialogueState, ShortTermMemory
 
@@ -24,8 +24,24 @@ MEMORY_SIGNAL_WORDS = (
 )
 
 
+class SummaryLLM(Protocol):
+    def call(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 1024,
+        response_format: str = "text",
+        purpose: str = "",
+        budgeted: bool = False,
+    ) -> str:
+        ...
+
+
 class DialogueManager:
-    def __init__(self) -> None:
+    def __init__(self, llm: SummaryLLM | None = None) -> None:
+        self.llm = llm
         self._states: Dict[str, DialogueState] = defaultdict(DialogueState)
         self.recent_raw_messages = 6
         self.highlight_source_messages = 24
@@ -114,24 +130,40 @@ class DialogueManager:
     def _build_summary(self, raw: list[dict[str, str]], highlights: list[str]) -> str:
         if not raw:
             return ""
-        user_messages = [item["content"] for item in raw if item["role"] == "user"]
-        assistant_messages = [item["content"] for item in raw if item["role"] == "assistant"]
-        parts: list[str] = []
-        if len(raw) > self.recent_raw_messages:
-            parts.append(f"已压缩历史消息数：{len(raw)}")
-        if user_messages:
-            latest_user = user_messages[-1]
-            if len(latest_user) > 180:
-                latest_user = latest_user[:177] + "..."
-            parts.append(f"历史用户诉求：{latest_user}")
-        if highlights:
-            parts.append("持续关注点：" + "；".join(item.split("：", 1)[-1] for item in highlights[:3]))
-        if assistant_messages:
-            latest_assistant = assistant_messages[-1]
-            if len(latest_assistant) > 220:
-                latest_assistant = latest_assistant[:217] + "..."
-            parts.append(f"历史系统回应：{latest_assistant}")
-        summary = "\n".join(parts)
+        if self.llm is None:
+            return ""
+
+        prompt = self._build_summary_prompt(raw, highlights)
+        summary = self.llm.call(
+            prompt,
+            system_prompt=(
+                "你是 ScholarAgent 的短期记忆摘要器。"
+                "只基于给定对话生成中文摘要，保留用户目标、约束、偏好、已确认结论和待跟进点。"
+                "不要补充外部事实，不要输出标题、JSON、Markdown 代码块或解释。"
+            ),
+            temperature=0.1,
+            max_tokens=320,
+            purpose="short_memory_summary",
+        ).strip()
         if len(summary) > self.max_summary_chars:
             summary = summary[: self.max_summary_chars - 3] + "..."
         return summary
+
+    def _build_summary_prompt(self, raw: list[dict[str, str]], highlights: list[str]) -> str:
+        messages: list[str] = []
+        for index, item in enumerate(raw, start=1):
+            role = item.get("role", "")
+            content = item.get("content", "")
+            messages.append(f"{index}. {role}：{content}")
+
+        highlight_text = "\n".join(f"- {item}" for item in highlights) if highlights else "无"
+        return (
+            "请把下面对话压缩为短期记忆摘要层，供下一轮回答直接使用。\n"
+            "输出要求：\n"
+            "1. 120 到 300 字，信息密度优先。\n"
+            "2. 保留明确约束、用户偏好、任务状态和已经达成的结论。\n"
+            "3. 不复述寒暄，不加入原文没有的信息。\n\n"
+            f"重点提炼层：\n{highlight_text}\n\n"
+            "待摘要对话：\n"
+            + "\n".join(messages)
+        )

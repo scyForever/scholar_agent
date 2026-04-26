@@ -34,7 +34,7 @@ class AgentV2:
         self.memory_context_builder = MemoryContextBuilder()
         self.feedback = FeedbackCollector()
         self.whitelist = WhitelistManager()
-        self.dialogue = DialogueManager()
+        self.dialogue = DialogueManager(self.llm)
         self.intent_classifier = IntentClassifier(self.llm, self.templates)
         self.slot_filler = SlotFiller()
         self.planner = TaskHierarchyPlanner()
@@ -85,7 +85,6 @@ class AgentV2:
     ) -> AgentResponse:
         state = self.dialogue.get_state(session_id)
         prior_search_result = state.last_search_result
-        self.dialogue.add_user_message(session_id, query)
         trace_id = self.tracer.start_trace(session_id, query, {"mode": self.execution_mode.value})
         if on_trace_start is not None:
             on_trace_start(trace_id)
@@ -95,6 +94,7 @@ class AgentV2:
         slots: Dict[str, Any] = {}
 
         try:
+            self.dialogue.add_user_message(session_id, query)
             recalled = self.memory.recall(query, user_id=session_id, limit=5)
             short_memory = self.dialogue.get_state(session_id).short_memory
             memory_context_result = self.memory_context_builder.build(

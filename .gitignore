@@ -226,5 +226,7 @@ secrets/
 config/secrets/
 projects/
 tests/
+!tests/
+!tests/test_dialogue_llm_summary.py
 nohup*
 *.json
