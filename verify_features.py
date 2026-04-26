@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from src.core.agent_v2 import AgentV2
 from src.core.llm import LLMManager
 from src.core.models import MemoryType
+from src.memory.context_builder import MemoryContextBuilder
 from src.memory.manager import MemoryManager
 from src.preprocessing.dialogue_manager import DialogueManager
 from src.prompt_templates.manager import PromptTemplateManager
@@ -43,7 +44,15 @@ def main() -> None:
     assert short_memory.raw
     assert short_memory.highlights
     assert short_memory.summary
+    assert short_memory.metadata["raw_messages"] >= 1
     assert "原文层" in dialogue.get_short_memory_context("verify_session")
+    context_result = MemoryContextBuilder(max_chars=1200).build(
+        short_memory=short_memory,
+        long_records=[],
+        query="大模型幻觉治理",
+    )
+    assert context_result.text
+    assert context_result.stats["context_chars"] <= 1200
 
     with TemporaryDirectory() as tmpdir:
         isolated_memory = MemoryManager(Path(tmpdir) / "memory.db")
