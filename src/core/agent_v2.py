@@ -94,8 +94,22 @@ class AgentV2:
 
         try:
             recalled = self.memory.recall(query, user_id=session_id, limit=5)
-            memory_context = "\n".join(item.content for item in recalled)
-            self.tracer.trace_step(trace_id, "memory_recall", {"query": query}, {"count": len(recalled)})
+            long_memory_context = self.memory.format_recall_context(recalled)
+            short_memory_context = self.dialogue.get_short_memory_context(session_id)
+            memory_context = "\n\n".join(item for item in (short_memory_context, long_memory_context) if item)
+            self.tracer.trace_step(
+                trace_id,
+                "memory_recall",
+                {"query": query},
+                {
+                    "short_layers": {
+                        "raw": len(self.dialogue.get_state(session_id).short_memory.raw),
+                        "highlights": len(self.dialogue.get_state(session_id).short_memory.highlights),
+                        "summary": bool(self.dialogue.get_state(session_id).short_memory.summary),
+                    },
+                    "long_count": len(recalled),
+                },
+            )
 
             if state.missing_slots and state.intent:
                 intent = state.intent
@@ -169,7 +183,11 @@ class AgentV2:
                 session_id,
                 f"用户问题：{query}\n系统回答：{answer}",
                 memory_type=MemoryType.CONVERSATION,
-                metadata={"intent": intent, "task_level": level.value},
+                metadata={
+                    "intent": intent,
+                    "task_level": level.value,
+                    "short_memory_summary": self.dialogue.get_state(session_id).short_memory.summary,
+                },
                 importance=0.7,
             )
 

@@ -558,6 +558,121 @@ def build_agent_cases() -> List[Dict[str, Any]]:
             }
         )
 
+    memory_theme = next(theme for theme in THEMES if theme.slug == "research_memory")
+    memory_domains = DOMAINS[:10]
+    for index, domain in enumerate(memory_domains):
+        title = memory_theme.title_template.format(domain_en=domain.en)
+        cases.append(
+            {
+                "case_id": f"agent-memory-short-long-{domain.slug}",
+                "query": f"只基于本地资料，继续解释《{title}》的核心方法，并按我之前说的结构化偏好回答",
+                "expected_intent": "explain_concept",
+                "expected_needs_input": False,
+                "required_slots": ["topic", "rag_mode"],
+                "expected_slot_values": {
+                    "rag_mode": "local_only",
+                },
+                "required_trace_steps": ["memory_recall", "intent", "slots", "planning", "search", "write"],
+                "optional_trace_steps": ["quality"],
+                "success_keywords": [title, memory_theme.survey_label],
+                "artifact_expectations": {
+                    "search_mode": "local_rag_only_by_instruction",
+                    "min_local_hits": 1,
+                },
+                "memory_setup": {
+                    "short_history": [
+                        {
+                            "role": "user",
+                            "content": f"我偏好结构化回答，重点关注{domain.zh}领域的用户偏好、已读论文摘要和摘要层记忆。",
+                        },
+                        {
+                            "role": "assistant",
+                            "content": "好的，我会按研究问题、方法机制、实验发现和实践启示组织回答。",
+                        },
+                    ],
+                    "long_term": [
+                        {
+                            "type": "preference",
+                            "content": f"用户长期偏好：{domain.zh}研究记忆任务需要优先说明短期原文层、重点提炼层、摘要层，以及长期关键词召回。",
+                            "metadata": {
+                                "topic": "research_memory",
+                                "domain": domain.slug,
+                                "keywords": ["研究记忆", "短期记忆", "长期记忆", domain.zh],
+                            },
+                            "importance": 0.95,
+                        }
+                    ],
+                    "other_user_long_term": [
+                        {
+                            "type": "preference",
+                            "content": f"其他用户偏好：{domain.zh}研究记忆只关注无关的旧版检索历史字段。",
+                            "metadata": {"topic": "noise", "domain": domain.slug},
+                            "importance": 0.95,
+                        }
+                    ],
+                },
+                "memory_expectations": {
+                    "min_short_raw": 3,
+                    "min_short_highlights": 1,
+                    "summary_required": True,
+                    "min_long_count": 1,
+                    "max_long_count": 3,
+                },
+            }
+        )
+
+    for index, domain in enumerate(memory_domains):
+        title = memory_theme.title_template.format(domain_en=domain.en)
+        cases.append(
+            {
+                "case_id": f"agent-memory-user-isolation-{domain.slug}",
+                "query": f"只基于本地资料，解释《{title}》，不要使用其他用户的长期偏好",
+                "expected_intent": "explain_concept",
+                "expected_needs_input": False,
+                "required_slots": ["topic", "rag_mode"],
+                "expected_slot_values": {
+                    "rag_mode": "local_only",
+                },
+                "required_trace_steps": ["memory_recall", "intent", "slots", "planning", "search", "write"],
+                "optional_trace_steps": ["quality"],
+                "success_keywords": [title, memory_theme.survey_label],
+                "artifact_expectations": {
+                    "search_mode": "local_rag_only_by_instruction",
+                    "min_local_hits": 1,
+                },
+                "memory_setup": {
+                    "short_history": [
+                        {
+                            "role": "user",
+                            "content": f"我现在只验证{domain.zh}场景的用户专属长期记忆隔离。",
+                        },
+                        {
+                            "role": "assistant",
+                            "content": "明白，本轮只应使用当前用户的短期会话上下文。",
+                        },
+                    ],
+                    "other_user_long_term": [
+                        {
+                            "type": "preference",
+                            "content": f"其他用户长期偏好：{domain.zh}研究记忆要求召回关键词隔离测试和个性化排序。",
+                            "metadata": {
+                                "topic": "research_memory",
+                                "domain": domain.slug,
+                                "keywords": ["研究记忆", "关键词隔离", domain.zh],
+                            },
+                            "importance": 0.99,
+                        }
+                    ],
+                },
+                "memory_expectations": {
+                    "min_short_raw": 3,
+                    "min_short_highlights": 1,
+                    "summary_required": True,
+                    "long_count": 0,
+                },
+            }
+        )
+
     return cases
 
 
@@ -598,8 +713,8 @@ def build_payloads() -> Dict[str, Dict[str, Any]]:
     agent = {
         "metadata": {
             "name": "ScholarAgent Agent 能力评测集",
-            "version": "3.0",
-            "description": "面向论文知识库任务流程的 agent 评测集，覆盖解释、比较、综述写作和缺槽追问。",
+            "version": "3.1",
+            "description": "面向论文知识库任务流程的 agent 评测集，覆盖解释、比较、综述写作、缺槽追问、短期三层记忆和长期用户专属召回。",
             "case_count": len(agent_cases),
         },
         "cases": agent_cases,

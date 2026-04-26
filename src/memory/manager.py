@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import re
 import sqlite3
 from collections import Counter
 from datetime import datetime, timedelta
@@ -16,8 +18,69 @@ from config.settings import settings
 from src.core.models import MemoryRecord, MemoryType, Paper
 
 
+STOPWORDS = {
+    "the",
+    "and",
+    "for",
+    "with",
+    "this",
+    "that",
+    "from",
+    "用户",
+    "系统",
+    "回答",
+    "问题",
+    "请",
+    "需要",
+    "一个",
+    "以及",
+    "进行",
+    "关于",
+    "论文",
+}
+CJK_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
+WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_+\-.]{1,}|\d{4}")
+
+
 def _tokenize(text: str) -> List[str]:
     return [token for token in text.lower().replace("/", " ").split() if token]
+
+
+def _owner_key(user_id: str) -> str:
+    normalized = (user_id or "default").strip().lower()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def _metadata_text(metadata: Dict[str, Any]) -> str:
+    values: list[str] = []
+    for value in metadata.values():
+        if isinstance(value, (str, int, float)):
+            values.append(str(value))
+        elif isinstance(value, list):
+            values.extend(str(item) for item in value if isinstance(item, (str, int, float)))
+    return " ".join(values)
+
+
+def _extract_keywords(text: str, *, limit: int = 18) -> List[str]:
+    counter: Counter[str] = Counter()
+    lowered = text.lower()
+    for token in WORD_RE.findall(lowered):
+        if token in STOPWORDS or len(token) < 2:
+            continue
+        counter[token] += 2
+
+    for segment in CJK_RE.findall(text):
+        if 2 <= len(segment) <= 8 and segment not in STOPWORDS:
+            counter[segment] += 3
+        max_ngram = min(6, len(segment))
+        for size in range(2, max_ngram + 1):
+            for index in range(0, len(segment) - size + 1):
+                token = segment[index : index + size]
+                if token in STOPWORDS:
+                    continue
+                counter[token] += 1 + size / 10
+
+    return [item for item, _ in counter.most_common(limit)]
 
 
 def _bm25_scores(query: str, documents: Iterable[str]) -> List[float]:
@@ -53,6 +116,17 @@ def _bm25_scores(query: str, documents: Iterable[str]) -> List[float]:
     return scores
 
 
+def _tfidf_scores(query: str, contents: List[str]) -> List[float]:
+    if not contents:
+        return []
+    try:
+        vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4))
+        matrix = vectorizer.fit_transform(contents + [query])
+        return [float(item) for item in cosine_similarity(matrix[:-1], matrix[-1]).ravel()]
+    except ValueError:
+        return [0.0 for _ in contents]
+
+
 class MemoryManager:
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = db_path or settings.memory_db_path
@@ -71,8 +145,10 @@ class MemoryManager:
                 CREATE TABLE IF NOT EXISTS memories (
                     id TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL,
+                    owner_key TEXT NOT NULL DEFAULT '',
                     type TEXT NOT NULL,
                     content TEXT NOT NULL,
+                    keywords TEXT NOT NULL DEFAULT '[]',
                     metadata TEXT NOT NULL,
                     importance REAL NOT NULL,
                     access_count INTEGER NOT NULL,
@@ -81,7 +157,81 @@ class MemoryManager:
                 )
                 """
             )
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(memories)").fetchall()}
+            if "owner_key" not in columns:
+                conn.execute("ALTER TABLE memories ADD COLUMN owner_key TEXT NOT NULL DEFAULT ''")
+            if "keywords" not in columns:
+                conn.execute("ALTER TABLE memories ADD COLUMN keywords TEXT NOT NULL DEFAULT '[]'")
+            self._backfill_memory_indexes(conn)
             conn.commit()
+
+    def _backfill_memory_indexes(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            """
+            SELECT id, user_id, content, metadata, owner_key, keywords
+            FROM memories
+            WHERE owner_key = '' OR keywords = '[]' OR keywords = ''
+            """
+        ).fetchall()
+        for row in rows:
+            metadata = self._load_metadata(row["metadata"])
+            keywords = self._row_keywords(row["keywords"], metadata)
+            if not keywords:
+                keywords = _extract_keywords(f"{row['content']}\n{_metadata_text(metadata)}")
+            metadata.setdefault("keywords", keywords)
+            conn.execute(
+                """
+                UPDATE memories
+                SET owner_key = ?, keywords = ?, metadata = ?
+                WHERE id = ?
+                """,
+                (
+                    _owner_key(row["user_id"]),
+                    json.dumps(keywords, ensure_ascii=False),
+                    json.dumps(metadata, ensure_ascii=False),
+                    row["id"],
+                ),
+            )
+
+    def _load_metadata(self, raw: str | None) -> Dict[str, Any]:
+        try:
+            loaded = json.loads(raw or "{}")
+            return loaded if isinstance(loaded, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def _row_keywords(self, raw: str | None, metadata: Dict[str, Any]) -> List[str]:
+        try:
+            loaded = json.loads(raw or "[]")
+            if isinstance(loaded, list):
+                keywords = [str(item).strip().lower() for item in loaded if str(item).strip()]
+                if keywords:
+                    return keywords
+        except json.JSONDecodeError:
+            pass
+        metadata_keywords = metadata.get("keywords")
+        if isinstance(metadata_keywords, list):
+            return [str(item).strip().lower() for item in metadata_keywords if str(item).strip()]
+        return []
+
+    def _user_profile_keywords(self, conn: sqlite3.Connection, user_id: str) -> set[str]:
+        rows = conn.execute(
+            """
+            SELECT keywords, metadata
+            FROM memories
+            WHERE owner_key = ? AND type IN (?, ?)
+            """,
+            (
+                _owner_key(user_id),
+                MemoryType.PREFERENCE.value,
+                MemoryType.RESEARCH_NOTE.value,
+            ),
+        ).fetchall()
+        profile: set[str] = set()
+        for row in rows:
+            metadata = self._load_metadata(row["metadata"])
+            profile.update(self._row_keywords(row["keywords"], metadata))
+        return profile
 
     def store(
         self,
@@ -94,18 +244,24 @@ class MemoryManager:
     ) -> str:
         now = datetime.utcnow().isoformat()
         memory_id = str(uuid4())
+        metadata_payload = dict(metadata or {})
+        keywords = _extract_keywords(f"{content}\n{_metadata_text(metadata_payload)}")
+        metadata_payload.setdefault("keywords", keywords)
+        metadata_payload.setdefault("memory_schema", "v2")
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO memories (id, user_id, type, content, metadata, importance, access_count, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO memories (id, user_id, owner_key, type, content, keywords, metadata, importance, access_count, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     memory_id,
                     user_id,
+                    _owner_key(user_id),
                     memory_type.value,
                     content,
-                    json.dumps(metadata or {}, ensure_ascii=False),
+                    json.dumps(keywords, ensure_ascii=False),
+                    json.dumps(metadata_payload, ensure_ascii=False),
                     float(importance),
                     0,
                     now,
@@ -129,8 +285,8 @@ class MemoryManager:
             where.append("type = ?")
             params.append(memory_type.value)
         if user_id is not None:
-            where.append("user_id = ?")
-            params.append(user_id)
+            where.append("owner_key = ?")
+            params.append(_owner_key(user_id))
         sql = "SELECT * FROM memories"
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -140,40 +296,60 @@ class MemoryManager:
                 return []
 
             contents = [row["content"] for row in rows]
-            vectorizer = TfidfVectorizer(ngram_range=(1, 2))
-            matrix = vectorizer.fit_transform(contents + [query])
-            similarities = cosine_similarity(matrix[:-1], matrix[-1]).ravel()
+            similarities = _tfidf_scores(query, contents)
             bm25 = _bm25_scores(query, contents)
             now = datetime.utcnow()
+            query_keywords = set(_extract_keywords(query, limit=12))
+            profile_keywords = self._user_profile_keywords(conn, user_id) if user_id else set()
 
-            scored: List[MemoryRecord] = []
+            scored: List[tuple[bool, MemoryRecord]] = []
             for idx, row in enumerate(rows):
                 created_at = datetime.fromisoformat(row["created_at"])
                 recency_days = max((now - created_at).days, 0)
                 recency_bonus = math.exp(-recency_days / 30)
+                metadata = self._load_metadata(row["metadata"])
+                row_keywords = set(self._row_keywords(row["keywords"], metadata))
+                keyword_overlap = row_keywords.intersection(query_keywords)
+                keyword_bonus = len(keyword_overlap) / max(len(query_keywords), 1) if query_keywords else 0.0
+                profile_overlap = row_keywords.intersection(profile_keywords)
+                profile_bonus = min(len(profile_overlap) / 5, 1.0) if profile_keywords else 0.0
+                if query_keywords and query_keywords.intersection(profile_keywords):
+                    profile_bonus = min(profile_bonus + 0.2, 1.0)
                 score = (
-                    0.45 * float(similarities[idx])
-                    + 0.25 * float(bm25[idx])
+                    0.35 * float(similarities[idx])
+                    + 0.2 * float(bm25[idx])
                     + 0.2 * float(row["importance"])
                     + 0.1 * recency_bonus
+                    + 0.1 * keyword_bonus
+                    + 0.05 * profile_bonus
                 )
+                if query_keywords and not keyword_overlap:
+                    score *= 0.75
                 scored.append(
-                    MemoryRecord(
-                        memory_id=row["id"],
-                        user_id=row["user_id"],
-                        content=row["content"],
-                        memory_type=MemoryType(row["type"]),
-                        metadata=json.loads(row["metadata"]),
-                        importance=row["importance"],
-                        access_count=row["access_count"],
-                        created_at=created_at,
-                        updated_at=datetime.fromisoformat(row["updated_at"]),
-                        score=score,
+                    (
+                        bool(keyword_overlap),
+                        MemoryRecord(
+                            memory_id=row["id"],
+                            user_id=row["user_id"],
+                            content=row["content"],
+                            memory_type=MemoryType(row["type"]),
+                            metadata=metadata,
+                            importance=row["importance"],
+                            access_count=row["access_count"],
+                            created_at=created_at,
+                            updated_at=datetime.fromisoformat(row["updated_at"]),
+                            score=score,
+                        ),
                     )
                 )
 
-            scored.sort(key=lambda item: item.score, reverse=True)
-            selected = scored[:limit]
+            scored.sort(key=lambda item: item[1].score, reverse=True)
+            if query_keywords and any(keyword_matched for keyword_matched, _ in scored):
+                matched = [record for keyword_matched, record in scored if keyword_matched]
+                unmatched = [record for keyword_matched, record in scored if not keyword_matched]
+                selected = [*matched, *unmatched][:limit]
+            else:
+                selected = [record for _, record in scored[:limit]]
             for record in selected:
                 conn.execute(
                     "UPDATE memories SET access_count = access_count + 1, updated_at = ? WHERE id = ?",
@@ -207,7 +383,7 @@ class MemoryManager:
                     user_id=row["user_id"],
                     content=row["content"],
                     memory_type=MemoryType(row["type"]),
-                    metadata=json.loads(row["metadata"]),
+                    metadata=self._load_metadata(row["metadata"]),
                     importance=row["importance"],
                     access_count=row["access_count"],
                     created_at=datetime.fromisoformat(row["created_at"]),
@@ -261,6 +437,8 @@ class MemoryManager:
                 "pmid": paper.pmid,
                 "source": paper.source,
                 "year": paper.year,
+                "paper_keywords": paper.keywords,
+                "categories": paper.categories,
             },
             importance=importance,
         )
@@ -288,10 +466,10 @@ class MemoryManager:
                 """
                 SELECT metadata, content
                 FROM memories
-                WHERE user_id = ? AND type IN (?, ?, ?)
+                WHERE owner_key = ? AND type IN (?, ?, ?)
                 """,
                 (
-                    user_id,
+                    _owner_key(user_id),
                     MemoryType.PAPER_SUMMARY.value,
                     MemoryType.RESEARCH_NOTE.value,
                     MemoryType.KNOWLEDGE.value,
@@ -299,7 +477,7 @@ class MemoryManager:
             ).fetchall()
         keys: set[str] = set()
         for row in rows:
-            metadata = json.loads(row["metadata"] or "{}")
+            metadata = self._load_metadata(row["metadata"])
             for field in ("paper_id", "title", "doi", "arxiv_id", "pmid"):
                 value = str(metadata.get(field) or "").strip().lower()
                 if value:
@@ -308,3 +486,16 @@ class MemoryManager:
             if content:
                 keys.add(content)
         return keys
+
+    def format_recall_context(self, records: List[MemoryRecord]) -> str:
+        if not records:
+            return ""
+        lines = ["长期记忆-用户专属召回："]
+        for record in records:
+            keywords = record.metadata.get("keywords") or []
+            keyword_text = "、".join(str(item) for item in keywords[:5]) if isinstance(keywords, list) else ""
+            prefix = f"- [{record.memory_type.value} score={record.score:.3f}]"
+            if keyword_text:
+                prefix += f" 关键词：{keyword_text}"
+            lines.append(f"{prefix}\n{record.content}")
+        return "\n".join(lines)

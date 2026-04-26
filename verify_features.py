@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from src.core.agent_v2 import AgentV2
 from src.core.llm import LLMManager
+from src.core.models import MemoryType
 from src.memory.manager import MemoryManager
+from src.preprocessing.dialogue_manager import DialogueManager
 from src.prompt_templates.manager import PromptTemplateManager
 from src.tools.registry import TOOL_REGISTRY
 from src.whitelist.manager import WhitelistManager
@@ -32,6 +35,30 @@ def main() -> None:
     assert memory.recall("结构化回答", limit=3)
     memory.remember_preference("verify_user", "偏好 2023-2024 年的大模型综述")
     assert memory.recall_research_context("verify_user", "大模型", limit=3)
+
+    dialogue = DialogueManager()
+    dialogue.add_user_message("verify_session", "我偏好结构化回答，重点关注大模型幻觉治理。")
+    dialogue.add_assistant_message("verify_session", "可以，我会按研究问题、方法、结论组织。")
+    short_memory = dialogue.get_state("verify_session").short_memory
+    assert short_memory.raw
+    assert short_memory.highlights
+    assert short_memory.summary
+    assert "原文层" in dialogue.get_short_memory_context("verify_session")
+
+    with TemporaryDirectory() as tmpdir:
+        isolated_memory = MemoryManager(Path(tmpdir) / "memory.db")
+        isolated_memory.remember_preference("alice", "用户偏好具身智能、多模态大模型和结构化综述")
+        isolated_memory.store(
+            "bob",
+            "用户偏好图神经网络和推荐系统论文",
+            memory_type=MemoryType.PREFERENCE,
+        )
+        alice_recall = isolated_memory.recall("具身智能综述", user_id="alice", limit=3)
+        bob_recall = isolated_memory.recall("具身智能综述", user_id="bob", limit=3)
+        assert alice_recall
+        assert all(item.user_id == "alice" for item in alice_recall)
+        assert all(item.user_id == "bob" for item in bob_recall)
+        assert "长期记忆-用户专属召回" in isolated_memory.format_recall_context(alice_recall)
 
     agent = AgentV2()
     status = agent.get_status()

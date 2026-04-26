@@ -12,13 +12,14 @@ from typing import Any, Dict, Iterable, List, Tuple
 from config.settings import settings
 from src.core.agent_v2 import AgentV2
 from src.core.llm import LLMManager
-from src.core.models import IndexedChunk, SearchResult
+from src.core.models import IndexedChunk, MemoryType, SearchResult
 from src.core.structured_outputs import (
     AgentSemanticEvaluationOutput,
     GenerationEvaluationOutput,
     RetrievalEvaluationOutput,
 )
 from src.evaluation.dataset_builder import write_payloads
+from src.memory.manager import MemoryManager
 from src.preprocessing.query_rewriter import QueryRewriter
 from src.rag.retriever import HybridRetriever
 from src.rag.vector_store import LocalChromaVectorStore
@@ -53,6 +54,8 @@ class AgentEvalCase:
     optional_trace_steps: List[str]
     success_keywords: List[str]
     artifact_expectations: Dict[str, Any]
+    memory_setup: Dict[str, Any]
+    memory_expectations: Dict[str, Any]
     required_missing_slots: List[str]
     forbidden_trace_steps: List[str]
 
@@ -223,7 +226,7 @@ class ProjectEvaluationRunner:
         retriever = self._build_retriever(workspace)
         corpus = self._load_corpus()
         self._index_corpus(retriever, corpus)
-        agent = self._build_agent_harness(retriever)
+        agent = self._build_agent_harness(retriever, workspace)
         semantic_eval_enabled = self.metric_judge_mode != "rule"
 
         case_reports: List[Dict[str, Any]] = []
@@ -231,6 +234,7 @@ class ProjectEvaluationRunner:
             runs: List[Dict[str, Any]] = []
             for repeat_index in range(max(repeats, 1)):
                 session_id = f"eval-{case.case_id}-{repeat_index}"
+                self._apply_memory_setup(agent, session_id, case)
                 started = time.perf_counter()
                 response = agent.chat(case.query, session_id=session_id)
                 latency_ms = (time.perf_counter() - started) * 1000.0
@@ -305,9 +309,15 @@ class ProjectEvaluationRunner:
         retriever.retrieve = MethodType(_patched_retrieve, retriever)
         return retriever
 
-    def _build_agent_harness(self, retriever: HybridRetriever) -> AgentV2:
+    def _build_agent_harness(self, retriever: HybridRetriever, workspace: Path) -> AgentV2:
         agent = AgentV2()
         agent.set_mode(fast_mode=True, enable_quality_enhance=False)
+        agent.memory = MemoryManager(workspace / "memory_eval.sqlite")
+        agent.research_skills.memory.memory = agent.memory
+        agent.multi_agent.skills.memory.memory = agent.memory
+        agent.multi_agent.research_search_agent.skills.memory.memory = agent.memory
+        agent.multi_agent.memory_agent.skills.memory.memory = agent.memory
+        agent.multi_agent.analyze_agent.memory_agent.skills.memory.memory = agent.memory
         agent.retriever = retriever
         agent.retriever.llm = agent.llm
         agent.reasoning.retriever = retriever
@@ -317,6 +327,51 @@ class ProjectEvaluationRunner:
         if self.agent_llm_mode == "mock":
             self._freeze_agent_llm_to_mock(agent)
         return agent
+
+    def _apply_memory_setup(self, agent: AgentV2, session_id: str, case: AgentEvalCase) -> None:
+        setup = dict(case.memory_setup or {})
+        for item in setup.get("short_history") or []:
+            role = str(item.get("role") or "").strip()
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            if role == "assistant":
+                agent.dialogue.add_assistant_message(session_id, content)
+            else:
+                agent.dialogue.add_user_message(session_id, content)
+
+        for item in setup.get("long_term") or []:
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            memory_type = self._memory_type(str(item.get("type") or "knowledge"))
+            agent.memory.store(
+                session_id,
+                content,
+                memory_type=memory_type,
+                metadata=dict(item.get("metadata") or {}),
+                importance=float(item.get("importance") or 0.7),
+            )
+
+        for item in setup.get("other_user_long_term") or []:
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            other_user_id = str(item.get("user_id") or f"{session_id}-other")
+            memory_type = self._memory_type(str(item.get("type") or "knowledge"))
+            agent.memory.store(
+                other_user_id,
+                content,
+                memory_type=memory_type,
+                metadata=dict(item.get("metadata") or {}),
+                importance=float(item.get("importance") or 0.7),
+            )
+
+    def _memory_type(self, raw: str) -> MemoryType:
+        try:
+            return MemoryType(raw)
+        except ValueError:
+            return MemoryType.KNOWLEDGE
 
     def _freeze_agent_llm_to_mock(self, agent: AgentV2) -> None:
         mock_provider = agent.llm.providers.get("mock")
@@ -413,6 +468,8 @@ class ProjectEvaluationRunner:
                     optional_trace_steps=[str(value) for value in item.get("optional_trace_steps") or []],
                     success_keywords=[str(value) for value in item.get("success_keywords") or []],
                     artifact_expectations=dict(item.get("artifact_expectations") or {}),
+                    memory_setup=dict(item.get("memory_setup") or {}),
+                    memory_expectations=dict(item.get("memory_expectations") or {}),
                     required_missing_slots=[str(value) for value in item.get("required_missing_slots") or []],
                     forbidden_trace_steps=[str(value) for value in item.get("forbidden_trace_steps") or []],
                 )
@@ -945,6 +1002,7 @@ class ProjectEvaluationRunner:
         missing_slot_match = self._missing_slot_match(case.required_missing_slots, steps)
         answer_keyword_coverage = self._keyword_coverage(case.success_keywords, answer)
         artifact_match, artifact_details = self._agent_artifact_match(case.artifact_expectations, response.artifacts)
+        memory_match, memory_details = self._memory_expectation_match(case.memory_expectations, steps)
         semantic_answer = self._provider_score_agent_answer(
             case=case,
             answer_text=answer,
@@ -971,6 +1029,7 @@ class ProjectEvaluationRunner:
             forbidden_step_ok,
             missing_slot_match,
             artifact_match,
+            memory_match,
         ]
         if semantic_eval_enabled and case.success_keywords:
             components.append(semantic_answer_score)
@@ -984,6 +1043,7 @@ class ProjectEvaluationRunner:
             and forbidden_step_ok == 1.0
             and missing_slot_match == 1.0
             and artifact_match == 1.0
+            and memory_match == 1.0
             and (
                 not semantic_eval_enabled
                 or not case.success_keywords
@@ -999,6 +1059,7 @@ class ProjectEvaluationRunner:
             "forbidden_step_ok": forbidden_step_ok,
             "missing_slot_match": round(missing_slot_match, 4),
             "artifact_match": round(artifact_match, 4),
+            "memory_match": round(memory_match, 4),
             "answer_keyword_coverage": round(answer_keyword_coverage, 4),
             "trace_step_count": len(step_types),
             "local_hit_count": self._local_hit_count(response.artifacts),
@@ -1018,6 +1079,7 @@ class ProjectEvaluationRunner:
             "slots": slots,
             "trace_steps": step_types,
             "artifact_details": artifact_details,
+            "memory_details": memory_details,
             "semantic_answer": {
                 "score": round(float(semantic_answer_score), 4),
                 "source": semantic_answer_source,
@@ -1152,6 +1214,52 @@ class ProjectEvaluationRunner:
         if "min_local_hits" in expectations:
             checks += 1
             if local_hits >= int(expectations["min_local_hits"] or 0):
+                passed += 1
+        return (passed / max(checks, 1), details)
+
+    def _memory_expectation_match(
+        self,
+        expectations: Dict[str, Any],
+        steps: List[Dict[str, Any]],
+    ) -> Tuple[float, Dict[str, Any]]:
+        if not expectations:
+            return 1.0, {}
+        memory_steps = [step for step in steps if step.get("type") == "memory_recall"]
+        if not memory_steps:
+            return 0.0, {"reason": "missing_memory_recall"}
+        output = memory_steps[-1].get("output") or {}
+        short_layers = output.get("short_layers") or {}
+        details: Dict[str, Any] = {
+            "short_raw": int(short_layers.get("raw") or 0),
+            "short_highlights": int(short_layers.get("highlights") or 0),
+            "short_summary": bool(short_layers.get("summary")),
+            "long_count": int(output.get("long_count") or 0),
+        }
+        checks = 0
+        passed = 0
+        if "min_short_raw" in expectations:
+            checks += 1
+            if details["short_raw"] >= int(expectations["min_short_raw"] or 0):
+                passed += 1
+        if "min_short_highlights" in expectations:
+            checks += 1
+            if details["short_highlights"] >= int(expectations["min_short_highlights"] or 0):
+                passed += 1
+        if "summary_required" in expectations:
+            checks += 1
+            if details["short_summary"] == bool(expectations["summary_required"]):
+                passed += 1
+        if "min_long_count" in expectations:
+            checks += 1
+            if details["long_count"] >= int(expectations["min_long_count"] or 0):
+                passed += 1
+        if "max_long_count" in expectations:
+            checks += 1
+            if details["long_count"] <= int(expectations["max_long_count"] or 0):
+                passed += 1
+        if "long_count" in expectations:
+            checks += 1
+            if details["long_count"] == int(expectations["long_count"] or 0):
                 passed += 1
         return (passed / max(checks, 1), details)
 
@@ -1306,8 +1414,8 @@ class ProjectEvaluationRunner:
                 "formula": "mean(1 if run.task_success else 0 for run in runs)",
             },
             "function_match_score": {
-                "description": "意图、槽位、trace、artifact 等组件匹配度的平均分。",
-                "formula": "mean([needs_input_match, intent_match, slot_coverage, slot_value_match, trace_step_coverage, forbidden_step_ok, missing_slot_match, artifact_match, optional(semantic_answer_score)])",
+                "description": "意图、槽位、trace、artifact、记忆行为等组件匹配度的平均分。",
+                "formula": "mean([needs_input_match, intent_match, slot_coverage, slot_value_match, trace_step_coverage, forbidden_step_ok, missing_slot_match, artifact_match, memory_match, optional(semantic_answer_score)])",
             },
             "performance_stability.latency_mean_ms": {
                 "description": "重复运行的平均时延。",
@@ -1318,7 +1426,7 @@ class ProjectEvaluationRunner:
                 "formula": "pstdev(run.latency_ms for run in runs)",
             },
             "process_metrics": {
-                "description": "过程指标按 case 求均值，包括意图匹配、槽位覆盖、trace 覆盖、本地命中数和约束/证据卡片是否出现。",
+                "description": "过程指标按 case 求均值，包括意图匹配、槽位覆盖、trace 覆盖、记忆匹配、本地命中数和约束/证据卡片是否出现。",
                 "formula": "mean(case.process_metrics[key] for case in cases)",
             },
             "process_metrics.semantic_answer_score": {
