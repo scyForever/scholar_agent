@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 import re
 from typing import Any, Dict, Iterable, List, Sequence
 
@@ -40,7 +39,18 @@ class ResearchMemorySkill:
         return self.memory.remember_paper(user_id, paper, summary, highlights=highlights)
 
     def recall_context(self, user_id: str, query: str, *, limit: int = 8) -> List[Dict[str, Any]]:
-        return [asdict(record) for record in self.memory.recall_research_context(user_id, query, limit=limit)]
+        records = self.memory.recall_research_context(user_id, query, limit=limit)
+        return [
+            {
+                "id": record.memory_id,
+                "type": record.memory_type.value,
+                "content": record.content,
+                "score": record.score,
+                "keywords": record.metadata.get("keywords", []),
+                "metadata": record.metadata,
+            }
+            for record in records
+        ]
 
     def rank_unseen_first(
         self,

@@ -202,6 +202,13 @@ class MemoryRecord:
 
 
 @dataclass(slots=True)
+class ShortTermMemory:
+    raw: List[Dict[str, str]] = field(default_factory=list)
+    highlights: List[str] = field(default_factory=list)
+    summary: str = ""
+
+
+@dataclass(slots=True)
 class AgentResponse:
     answer: str
     intent: str
@@ -218,6 +225,7 @@ class DialogueState:
     current_slots: Dict[str, Any] = field(default_factory=dict)
     missing_slots: List[str] = field(default_factory=list)
     history: List[Dict[str, str]] = field(default_factory=list)
+    short_memory: ShortTermMemory = field(default_factory=ShortTermMemory)
     last_trace_id: str = ""
     last_search_result: Optional[SearchResult] = None
 
