@@ -177,6 +177,7 @@ python run_evaluation.py --suite agent --repeats 1 --agent-llm-mode mock
 - `agent` 套件默认使用 `--agent-llm-mode mock`，避免评测过程被远程 provider 超时影响；如果你要联通真实模型观察生成质量，可改为 `--agent-llm-mode auto`。
 - `rag_report.json` 现在是组合报告，另外会单独输出 `retrieval_report.json`、`generation_report.json` 和 `agent_report.json`。
 - 详细说明见 [docs/评测数据集与脚本.md](/media/a1/16T/lcy/scholar_agent/docs/评测数据集与脚本.md)。
+- 记忆管理说明见 [docs/记忆管理机制.md](/media/a1/16T/lcy/scholar_agent/docs/记忆管理机制.md)。
 
 ## 5. 使用示例
 

@@ -27,9 +27,10 @@ MEMORY_SIGNAL_WORDS = (
 class DialogueManager:
     def __init__(self) -> None:
         self._states: Dict[str, DialogueState] = defaultdict(DialogueState)
-        self.max_raw_messages = 12
-        self.max_highlights = 8
-        self.max_summary_chars = 700
+        self.recent_raw_messages = 6
+        self.highlight_source_messages = 24
+        self.max_highlights = 10
+        self.max_summary_chars = 900
 
     def get_state(self, session_id: str) -> DialogueState:
         return self._states[session_id]
@@ -52,7 +53,7 @@ class DialogueManager:
         memory = self._states[session_id].short_memory
         sections: list[str] = []
         if memory.raw:
-            raw_lines = [f"{item['role']}：{item['content']}" for item in memory.raw[-6:]]
+            raw_lines = [f"{item['role']}：{item['content']}" for item in memory.raw]
             sections.append("短期记忆-原文层：\n" + "\n".join(raw_lines))
         if memory.highlights:
             sections.append("短期记忆-重点提炼层：\n" + "\n".join(f"- {item}" for item in memory.highlights))
@@ -62,19 +63,31 @@ class DialogueManager:
 
     def _refresh_short_memory(self, session_id: str) -> None:
         state = self._states[session_id]
-        raw = [
+        normalized = [
             {
                 "role": str(item.get("role") or ""),
                 "content": str(item.get("content") or "").strip(),
             }
-            for item in state.history[-self.max_raw_messages :]
+            for item in state.history
             if str(item.get("content") or "").strip()
         ]
-        highlights = self._extract_highlights(raw)
+        raw = normalized[-self.recent_raw_messages :]
+        older = normalized[: -self.recent_raw_messages]
+        highlight_source = normalized[-self.highlight_source_messages :]
+        highlights = self._extract_highlights(highlight_source)
+        summary_source = older if older else normalized
+        summary = self._build_summary(summary_source, highlights)
+        metadata = {
+            "history_messages": len(normalized),
+            "raw_messages": len(raw),
+            "older_messages": len(older),
+            "highlight_source_messages": len(highlight_source),
+        }
         state.short_memory = ShortTermMemory(
             raw=raw,
             highlights=highlights,
-            summary=self._build_summary(raw, highlights),
+            summary=summary,
+            metadata=metadata,
         )
 
     def _extract_highlights(self, raw: list[dict[str, str]]) -> list[str]:
@@ -87,23 +100,16 @@ class DialogueManager:
                     sentence = sentence[:177] + "..."
                 if any(word in sentence for word in MEMORY_SIGNAL_WORDS):
                     candidates.append(f"{item['role']}：{sentence}")
-        if len(candidates) < self.max_highlights:
-            for item in raw[-4:]:
-                content = item["content"]
-                if len(content) > 120:
-                    content = content[:117] + "..."
-                candidates.append(f"{item['role']}：{content}")
-
         deduped: list[str] = []
         seen: set[str] = set()
-        for item in candidates:
+        for item in reversed(candidates):
             if item in seen:
                 continue
             seen.add(item)
             deduped.append(item)
             if len(deduped) >= self.max_highlights:
                 break
-        return deduped
+        return list(reversed(deduped))
 
     def _build_summary(self, raw: list[dict[str, str]], highlights: list[str]) -> str:
         if not raw:
@@ -111,18 +117,20 @@ class DialogueManager:
         user_messages = [item["content"] for item in raw if item["role"] == "user"]
         assistant_messages = [item["content"] for item in raw if item["role"] == "assistant"]
         parts: list[str] = []
+        if len(raw) > self.recent_raw_messages:
+            parts.append(f"已压缩历史消息数：{len(raw)}")
         if user_messages:
             latest_user = user_messages[-1]
             if len(latest_user) > 180:
                 latest_user = latest_user[:177] + "..."
-            parts.append(f"最近用户诉求：{latest_user}")
+            parts.append(f"历史用户诉求：{latest_user}")
         if highlights:
             parts.append("持续关注点：" + "；".join(item.split("：", 1)[-1] for item in highlights[:3]))
         if assistant_messages:
             latest_assistant = assistant_messages[-1]
             if len(latest_assistant) > 220:
                 latest_assistant = latest_assistant[:217] + "..."
-            parts.append(f"最近系统回应：{latest_assistant}")
+            parts.append(f"历史系统回应：{latest_assistant}")
         summary = "\n".join(parts)
         if len(summary) > self.max_summary_chars:
             summary = summary[: self.max_summary_chars - 3] + "..."

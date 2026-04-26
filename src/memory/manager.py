@@ -145,10 +145,10 @@ class MemoryManager:
                 CREATE TABLE IF NOT EXISTS memories (
                     id TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL,
-                    owner_key TEXT NOT NULL DEFAULT '',
+                    owner_key TEXT NOT NULL,
                     type TEXT NOT NULL,
                     content TEXT NOT NULL,
-                    keywords TEXT NOT NULL DEFAULT '[]',
+                    keywords TEXT NOT NULL,
                     metadata TEXT NOT NULL,
                     importance REAL NOT NULL,
                     access_count INTEGER NOT NULL,
@@ -157,41 +157,9 @@ class MemoryManager:
                 )
                 """
             )
-            columns = {row["name"] for row in conn.execute("PRAGMA table_info(memories)").fetchall()}
-            if "owner_key" not in columns:
-                conn.execute("ALTER TABLE memories ADD COLUMN owner_key TEXT NOT NULL DEFAULT ''")
-            if "keywords" not in columns:
-                conn.execute("ALTER TABLE memories ADD COLUMN keywords TEXT NOT NULL DEFAULT '[]'")
-            self._backfill_memory_indexes(conn)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_owner_type ON memories (owner_key, type)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_owner_updated ON memories (owner_key, updated_at)")
             conn.commit()
-
-    def _backfill_memory_indexes(self, conn: sqlite3.Connection) -> None:
-        rows = conn.execute(
-            """
-            SELECT id, user_id, content, metadata, owner_key, keywords
-            FROM memories
-            WHERE owner_key = '' OR keywords = '[]' OR keywords = ''
-            """
-        ).fetchall()
-        for row in rows:
-            metadata = self._load_metadata(row["metadata"])
-            keywords = self._row_keywords(row["keywords"], metadata)
-            if not keywords:
-                keywords = _extract_keywords(f"{row['content']}\n{_metadata_text(metadata)}")
-            metadata.setdefault("keywords", keywords)
-            conn.execute(
-                """
-                UPDATE memories
-                SET owner_key = ?, keywords = ?, metadata = ?
-                WHERE id = ?
-                """,
-                (
-                    _owner_key(row["user_id"]),
-                    json.dumps(keywords, ensure_ascii=False),
-                    json.dumps(metadata, ensure_ascii=False),
-                    row["id"],
-                ),
-            )
 
     def _load_metadata(self, raw: str | None) -> Dict[str, Any]:
         try:
@@ -200,18 +168,13 @@ class MemoryManager:
         except json.JSONDecodeError:
             return {}
 
-    def _row_keywords(self, raw: str | None, metadata: Dict[str, Any]) -> List[str]:
+    def _row_keywords(self, raw: str | None) -> List[str]:
         try:
             loaded = json.loads(raw or "[]")
             if isinstance(loaded, list):
-                keywords = [str(item).strip().lower() for item in loaded if str(item).strip()]
-                if keywords:
-                    return keywords
+                return [str(item).strip().lower() for item in loaded if str(item).strip()]
         except json.JSONDecodeError:
             pass
-        metadata_keywords = metadata.get("keywords")
-        if isinstance(metadata_keywords, list):
-            return [str(item).strip().lower() for item in metadata_keywords if str(item).strip()]
         return []
 
     def _user_profile_keywords(self, conn: sqlite3.Connection, user_id: str) -> set[str]:
@@ -230,7 +193,7 @@ class MemoryManager:
         profile: set[str] = set()
         for row in rows:
             metadata = self._load_metadata(row["metadata"])
-            profile.update(self._row_keywords(row["keywords"], metadata))
+            profile.update(self._row_keywords(row["keywords"]))
         return profile
 
     def store(
@@ -247,7 +210,6 @@ class MemoryManager:
         metadata_payload = dict(metadata or {})
         keywords = _extract_keywords(f"{content}\n{_metadata_text(metadata_payload)}")
         metadata_payload.setdefault("keywords", keywords)
-        metadata_payload.setdefault("memory_schema", "v2")
         with self._connect() as conn:
             conn.execute(
                 """
@@ -276,14 +238,19 @@ class MemoryManager:
         query: str,
         memory_type: Optional[MemoryType] = None,
         *,
+        memory_types: Optional[List[MemoryType]] = None,
         user_id: Optional[str] = None,
         limit: int = 5,
     ) -> List[MemoryRecord]:
         where: List[str] = []
         params: List[Any] = []
+        selected_types = list(memory_types or [])
         if memory_type is not None:
-            where.append("type = ?")
-            params.append(memory_type.value)
+            selected_types.append(memory_type)
+        if selected_types:
+            placeholders = ", ".join("?" for _ in selected_types)
+            where.append(f"type IN ({placeholders})")
+            params.extend(item.value for item in selected_types)
         if user_id is not None:
             where.append("owner_key = ?")
             params.append(_owner_key(user_id))
@@ -308,7 +275,7 @@ class MemoryManager:
                 recency_days = max((now - created_at).days, 0)
                 recency_bonus = math.exp(-recency_days / 30)
                 metadata = self._load_metadata(row["metadata"])
-                row_keywords = set(self._row_keywords(row["keywords"], metadata))
+                row_keywords = set(self._row_keywords(row["keywords"]))
                 keyword_overlap = row_keywords.intersection(query_keywords)
                 keyword_bonus = len(keyword_overlap) / max(len(query_keywords), 1) if query_keywords else 0.0
                 profile_overlap = row_keywords.intersection(profile_keywords)
@@ -450,15 +417,18 @@ class MemoryManager:
         *,
         limit: int = 8,
     ) -> List[MemoryRecord]:
-        records = self.recall(query, user_id=user_id, limit=max(limit * 2, limit))
         allowed_types = {
             MemoryType.PREFERENCE,
             MemoryType.PAPER_SUMMARY,
             MemoryType.RESEARCH_NOTE,
             MemoryType.KNOWLEDGE,
         }
-        filtered = [record for record in records if record.memory_type in allowed_types]
-        return filtered[:limit]
+        return self.recall(
+            query,
+            user_id=user_id,
+            memory_types=list(allowed_types),
+            limit=limit,
+        )
 
     def seen_paper_keys(self, user_id: str) -> set[str]:
         with self._connect() as conn:

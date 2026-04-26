@@ -8,6 +8,7 @@ from src.agents.multi_agent import MultiAgentCoordinator
 from src.core.llm import LLMManager
 from src.core.models import AgentResponse, ExecutionMode, MemoryType, SearchResult
 from src.feedback.collector import FeedbackCollector
+from src.memory.context_builder import MemoryContextBuilder
 from src.memory.manager import MemoryManager
 from src.pipeline import AgentRuntimeGraph
 from src.planning.task_hierarchy import TaskHierarchyPlanner
@@ -30,6 +31,7 @@ class AgentV2:
         self.templates = PromptTemplateManager()
         self.templates.ensure_default_templates()
         self.memory = MemoryManager()
+        self.memory_context_builder = MemoryContextBuilder()
         self.feedback = FeedbackCollector()
         self.whitelist = WhitelistManager()
         self.dialogue = DialogueManager()
@@ -94,20 +96,25 @@ class AgentV2:
 
         try:
             recalled = self.memory.recall(query, user_id=session_id, limit=5)
-            long_memory_context = self.memory.format_recall_context(recalled)
-            short_memory_context = self.dialogue.get_short_memory_context(session_id)
-            memory_context = "\n\n".join(item for item in (short_memory_context, long_memory_context) if item)
+            short_memory = self.dialogue.get_state(session_id).short_memory
+            memory_context_result = self.memory_context_builder.build(
+                query=query,
+                short_memory=short_memory,
+                long_records=recalled,
+            )
+            memory_context = memory_context_result.text
             self.tracer.trace_step(
                 trace_id,
                 "memory_recall",
                 {"query": query},
                 {
                     "short_layers": {
-                        "raw": len(self.dialogue.get_state(session_id).short_memory.raw),
-                        "highlights": len(self.dialogue.get_state(session_id).short_memory.highlights),
-                        "summary": bool(self.dialogue.get_state(session_id).short_memory.summary),
+                        "raw": len(short_memory.raw),
+                        "highlights": len(short_memory.highlights),
+                        "summary": bool(short_memory.summary),
                     },
                     "long_count": len(recalled),
+                    "context_budget": memory_context_result.stats,
                 },
             )
 
@@ -181,7 +188,7 @@ class AgentV2:
 
             self.memory.store(
                 session_id,
-                f"用户问题：{query}\n系统回答：{answer}",
+                self._conversation_memory_content(query, answer, intent),
                 memory_type=MemoryType.CONVERSATION,
                 metadata={
                     "intent": intent,
@@ -218,6 +225,21 @@ class AgentV2:
             if budget_tokens is not None:
                 self.llm.reset_budget(budget_tokens)
             self.llm.reset_trace(trace_tokens)
+
+    def _conversation_memory_content(self, query: str, answer: str, intent: str) -> str:
+        compact_answer = answer.strip()
+        if len(compact_answer) > 600:
+            compact_answer = compact_answer[:597] + "..."
+        compact_query = query.strip()
+        if len(compact_query) > 240:
+            compact_query = compact_query[:237] + "..."
+        return "\n".join(
+            [
+                f"用户问题：{compact_query}",
+                f"任务意图：{intent}",
+                f"回答摘要：{compact_answer}",
+            ]
+        )
 
     def submit_feedback(self, session_id: str, query: str, response: str, rating: int, comment: str = "") -> None:
         self.feedback.record_feedback(session_id, query, response, rating, comment)

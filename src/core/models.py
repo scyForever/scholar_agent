@@ -206,6 +206,7 @@ class ShortTermMemory:
     raw: List[Dict[str, str]] = field(default_factory=list)
     highlights: List[str] = field(default_factory=list)
     summary: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
