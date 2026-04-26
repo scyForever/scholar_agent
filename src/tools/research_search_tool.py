@@ -3,16 +3,22 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 import math
+import os
 import re
 from typing import Any, Dict, Iterable, List, Sequence
 import xml.etree.ElementTree as ET
 
 import requests
 
-from api_keys import get_named_api_key
 from src.core.models import Paper
 from src.preprocessing.query_rewriter import QueryRewriter
 from src.tools.registry import ToolDefinition, ToolParameter, register_tool
+
+try:
+    from api_keys import get_named_api_key
+except ImportError:  # pragma: no cover
+    def get_named_api_key(name: str) -> str:
+        return os.getenv(name, "")
 
 try:
     from bs4 import BeautifulSoup

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from abc import ABC, abstractmethod
 from contextvars import ContextVar, Token
@@ -8,8 +9,15 @@ from dataclasses import dataclass
 from uuid import UUID
 from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar
 
-from api_keys import get_api_key
 from config.settings import settings
+
+try:
+    from api_keys import get_api_key
+except ImportError:  # pragma: no cover
+    def get_api_key(provider_name: str) -> str:
+        cfg = settings.provider_configs.get(provider_name, {})
+        key_name = str(cfg.get("api_key_name") or f"{provider_name.upper()}_API_KEY")
+        return os.getenv(key_name, "")
 
 try:
     from pydantic import BaseModel
